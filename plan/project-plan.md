@@ -36,6 +36,10 @@ This document is the working reference for implementation. Requirements below ar
 
 Missing or blank settings stop startup with a simple missing-environment-variable error. The environment must be `experimental` or `operational`, as required by the environment safety standards. Connection string syntax is not validated here. The module does not connect to a database, authorize operational execution, or prove target isolation. Add future required application settings to the `Env_Vars` type and `env_vars` object; the missing-value check automatically covers every object entry.
 
+### Implemented execution naming
+
+The [pipeline orchestrator](../core/system/pipeline-orchestrator.ts) exposes `execute_pipeline` to invoke the supplied `perform_pipeline_work` callback and record its outcome. The [execution history helpers](../core/system/pipeline-execution.ts), `record_pipeline_execution_start` and `record_pipeline_execution_completion`, only persist lifecycle metadata; they do not execute source work or advance pipeline progress. This implementation does not yet provide execution locking.
+
 ## 2. Architecture
 
 ```text

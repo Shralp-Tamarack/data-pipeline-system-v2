@@ -1,8 +1,11 @@
 import dotenv from "dotenv";
 import {resolve} from "node:path";
 
+const configuration_directory =
+  typeof __dirname === "string" ? __dirname : import.meta.dirname;
+
 dotenv.config({
-  path : resolve(import.meta.dirname, "..", "..", ".env"),
+  path : resolve(configuration_directory, "..", "..", ".env"),
   quiet : true
 });
 

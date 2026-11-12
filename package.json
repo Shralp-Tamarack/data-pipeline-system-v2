@@ -6,7 +6,9 @@
   "scripts": {
     "build": "tsc",
     "type-check": "tsc --noEmit",
-    "sandbox" : "cd sandbox && node"
+    "sandbox" : "cd sandbox && node",
+    "gen-drizzle-ddl" : "drizzle-kit generate",
+    "exe-drizzle-ddl" : "drizzle-kit migrate"
   },
   "keywords": [],
   "author": "",

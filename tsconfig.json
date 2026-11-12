@@ -1,0 +1,19 @@
+{
+  "compilerOptions" : {
+    "target" : "ES2022",
+    "module" : "NodeNext",
+    "moduleResolution" : "NodeNext",
+    "rootDir" : ".",
+    "outDir" : "dist",
+    "types" : ["node"],
+    "strict" : true,
+    "noUncheckedIndexedAccess" : true,
+    "verbatimModuleSyntax" : true,
+    "erasableSyntaxOnly" : true,
+    "noEmitOnError" : true,
+    "forceConsistentCasingInFileNames" : true,
+    "sourceMap" : true
+  },
+  "include" : ["core/**/*.ts", "scripts/**/*.ts"],
+  "exclude" : ["node_modules", "dist"]
+}

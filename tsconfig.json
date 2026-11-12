@@ -3,10 +3,12 @@
     "target" : "ES2022",
     "module" : "NodeNext",
     "moduleResolution" : "NodeNext",
+    "rewriteRelativeImportExtensions" : true,
     "rootDir" : ".",
     "outDir" : "dist",
     "types" : ["node"],
     "strict" : true,
+    "skipLibCheck" : true,
     "noUncheckedIndexedAccess" : true,
     "verbatimModuleSyntax" : true,
     "erasableSyntaxOnly" : true,
@@ -14,6 +16,6 @@
     "forceConsistentCasingInFileNames" : true,
     "sourceMap" : true
   },
-  "include" : ["core/**/*.ts", "scripts/**/*.ts"],
+  "include" : ["core/**/*.ts", "scripts/**/*.ts", "sandbox/**/*.ts", "drizzle.config.ts"],
   "exclude" : ["node_modules", "dist"]
 }

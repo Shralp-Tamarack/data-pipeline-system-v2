@@ -19,6 +19,9 @@ This document is the working reference for implementation. Requirements below ar
 ### Agreed technologies and conventions
 
 - Node.js with TypeScript and explicit ES module imports.
+- Local source imports use `.ts` extensions for direct Node execution; TypeScript's `rewriteRelativeImportExtensions` rewrites them to `.js` during compilation.
+- TypeScript uses `skipLibCheck` to avoid checking declaration-file internals, including Drizzle's optional database-driver declarations. Application source and its use of dependency types remain checked.
+- TypeScript-first compile-time checking; explicit runtime validation for external input. Use Zod only when a concrete runtime schema adds value, not for every internal value or simple configuration check.
 - Neon PostgreSQL for warehouse data and durable pipeline metadata.
 - Drizzle for typed schema definitions, migrations, and appropriate queries; use parameterized SQL where clearer.
 - `node-cron` for centralized schedules.
@@ -26,6 +29,12 @@ This document is the working reference for implementation. Requirements below ar
 - Runtime names use `snake_case`; types and table metadata use `Pascal_Snake_Case`; files use kebab-case.
 - Flat shared files in `core/`, with shallow feature/source groups where meaningful.
 - Environment names: `experimental` for building and testing; `operational` for the live system in use. Follow the [Cautious Development Standards](../.github/copilot-instructions.md#10-cautious-development-standards) for isolation, target verification, secret handling, and controlled operational changes.
+
+### Implemented configuration boundary
+
+[System configuration](../core/system/system-configuration.ts) loads the project-root `.env` through dotenv when imported, independently of the command's working directory, without overriding variables already supplied by the process environment. It builds one settings object, checks all its entries for missing or blank values, then exports typed `env_vars` after validation, using plain runtime checks without Zod. Empty strings are temporary missing-value markers only; they cannot pass validation or reach the export. Required settings are `system_environment` and `data_warehouse_connection_string`; local commands do not need `--env-file`. Compiled code retains the same module-relative lookup, so a deployment running compiled output must supply settings through its process environment or deliberately configure its environment-file location.
+
+Missing or blank settings stop startup with a simple missing-environment-variable error. The environment must be `experimental` or `operational`, as required by the environment safety standards. Connection string syntax is not validated here. The module does not connect to a database, authorize operational execution, or prove target isolation. Add future required application settings to the `Env_Vars` type and `env_vars` object; the missing-value check automatically covers every object entry.
 
 ## 2. Architecture
 

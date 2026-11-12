@@ -62,6 +62,13 @@ Object-scoped properties may rely on their object as the primary phrase, such as
 
 These rules apply only to names you create; follow the programming language's conventions and preserve exact names from libraries, frameworks, dependencies, APIs, and imported code when required for correctness or interoperability.
 
+#### Data Record Terminology
+
+- Use `record` as the preferred generic name for a single self-contained unit of data, whether received from an API, database, or file. Use `records` for a collection.
+- Prefer `record` over vague names such as `item` when referring to that unit: `raw_record`, `source_record`, `records_loaded`, and `Source_Record`.
+- Keep concrete business nouns when they are clearer, such as `order`, `customer`, or `payment`. This does not override the descriptive naming priority or externally defined names.
+- A record is one unit within a dataset; do not use the terms interchangeably or rename a dataset identifier as if it identified one record.
+
 ### 3.4 Action Naming Rule
 
 Functions and methods are verb-first actions. Use `_` to separate all words in the action and target: `run_users_pipeline`, `get_users_processed`, `find_user_by_source_id`, `extract_and_load`. Apply section 3.3 to the target and context that follow.
@@ -203,6 +210,14 @@ data interpretation, and technical maintenance.
 - Explicit typing: strictly type function parameters, return types, and domain models by default, but keep pragmatism above theory.
 - Types & interfaces: only use TS types. Do NOT use TS interfaces. Keep single-file types in that file. Move shared types to a dedicated types file.
 
+### TypeScript-First Validation
+
+- Default to TypeScript for checks that can be enforced at compile time, including internal contracts, function arguments, return values, and domain models.
+- Validate external values at runtime where TypeScript cannot establish their correctness, including environment variables, API responses, file contents, and database values that are not already validated.
+- Use simple, explicit runtime checks for small requirements. Use Zod only where a concrete runtime-validation need benefits from a schema; do not apply it everywhere or duplicate checks already guaranteed by TypeScript.
+- Type annotations and assertions do not validate runtime values. Never cast missing or untrusted input into a valid type to bypass validation.
+- Keep runtime failures clear and explicit without exposing sensitive input values.
+
 ## 8) Documentation Standards (Hierarchical)
 
 **Agent rule:** When code changes, update corresponding documentation in the same turn.
@@ -270,6 +285,7 @@ A directory should reduce organizational complexity, not merely relocate it. Whe
 - Be able to articulate the concrete benefit of any proposed directory.
 - Always respect framework and tooling requirements.
 - In this repository, put shared standalone files directly in `core/` and feature-related files in `core/<feature>/`. Do not add a generic `modules/` layer or nest category directories inside a feature without a documented concrete exception.
+- Put ad hoc connection checks, exploratory tests, and other non-core experiments in the existing `sandbox/` directory with descriptive filenames. Include sandbox TypeScript files in type-checking; do not execute them automatically during builds.
 - Colocate each source system's pipelines, extractor constructors, authentication, connection code, and orchestrator when they belong to that integration. Keep filenames meaningful on their own.
 - During authorized restructuring, preserve runtime logic, exported symbols, commands, database identities, schedules, and source contracts. Update imports, schema-discovery paths, documentation, and tests together; do not generate or apply migrations solely for file moves.
 - Preserve externally defined and tooling-required filenames such as `package.json`, `tsconfig.json`, and migration metadata rather than renaming them for conformity.
@@ -292,9 +308,9 @@ Protect the live application, warehouse, source systems, and users while develop
 
 - **Experimental** (`experimental`): the environment for building, testing, debugging, and validating changes before operational use.
 - **Operational** (`operational`): the live environment and software version currently running in use.
-- Use these names consistently in project-owned configuration, commands, documentation, deployment labels, and application messages. Use `pipeline_environment` with the explicit value `experimental` or `operational`.
+- Use these names consistently in project-owned configuration, commands, documentation, deployment labels, and application messages. Use `system_environment` with the explicit value `experimental` or `operational`.
 - Do not use `development` or `production` as alternative names for these project environments.
-- Preserve externally required names and values, such as a dependency's `NODE_ENV=production`, where interoperability requires them. Keep these separate from `pipeline_environment`; they do not determine which database or environment a command targets.
+- Preserve externally required names and values, such as a dependency's `NODE_ENV=production`, where interoperability requires them. Keep these separate from `system_environment`; they do not determine which database or environment a command targets.
 - Validate the selected environment before execution. Missing or invalid environment values must fail explicitly; never silently default to the operational environment.
 
 ### 10.2 Isolation and Target Verification
@@ -330,4 +346,41 @@ Protect the live application, warehouse, source systems, and users while develop
 
 - Document environment setup, target selection, operational approval requirements, and recovery procedures alongside the relevant commands and deployment instructions.
 - Distinguish written standards from implemented safeguards. Do not claim that environment labels, ignored files, backups, or isolation are enforced until they have been verified.
+
+## 11) Project Setup & Configuration Standards
+
+### 11.1 Node.js and TypeScript
+
+- Use a supported Node.js release that supports native TypeScript execution for local commands. Do not add a TypeScript runner or bundler unless a concrete requirement needs one.
+- Use ES modules with `"type" : "module"` in `package.json` and `"module" : "NodeNext"` plus `"moduleResolution" : "NodeNext"` in `tsconfig.json`.
+- Relative imports of local TypeScript source files must include the `.ts` extension, not `.js`. Preserve package import names and extensions required by external JavaScript modules or other file formats.
+- Enable `"rewriteRelativeImportExtensions" : true` so compiled output rewrites local `.ts` imports to `.js`. Do not manually change source imports to run a build.
+- Enable strict type-checking, `"erasableSyntaxOnly" : true`, and `"noEmitOnError" : true`. Native Node TypeScript execution strips types; it does not type-check the program.
+- Keep separate `build` and `type-check` commands. Generated JavaScript belongs in `dist/`, not beside source files.
+
+### 11.2 Root Layout and Sandbox
+
+- Use `core/` for application source instead of introducing a conventional `src/` directory. Follow section 9 for shallow grouping and descriptive filenames.
+- Keep `sandbox/` at the project root for ad hoc checks, exploratory tests, and experiments. Keep reusable application logic in `core/`; do not move it into sandbox merely to test it.
+- Include `core/**/*.ts`, `scripts/**/*.ts` where present, and `sandbox/**/*.ts` in TypeScript checking. Use `"rootDir" : "."` and `"outDir" : "dist"` to preserve this layout in compiled output.
+- Keep the sandbox command simple: `"sandbox" : "cd sandbox && node"`. Run a file with `npm run sandbox check-warehouse.ts`, substituting the desired filename.
+- Sandbox commands run from the sandbox directory. Resolve important resource paths deliberately rather than assuming the working directory is the project root.
+- Do not execute sandbox checks automatically during builds, imports of core modules, or application startup. Sandbox placement does not authorize source access or database mutations; section 10 still applies.
+
+### 11.3 Shared Environment Configuration
+
+- Load local environment settings in the shared configuration module before building the typed `env_vars` object. Callers importing `env_vars` should not need to repeat environment-file flags or load dotenv themselves.
+- Resolve the environment-file location independently of the caller's working directory. For compiled deployments, verify the actual file location or supply settings through the hosting environment; source and compiled module paths differ.
+- Do not override variables already supplied by the process environment. Keep dotenv diagnostics quiet so normal imports do not produce unnecessary output.
+- Use an explicit TypeScript type and one application settings object. Declare required settings there instead of exporting every operating-system environment variable.
+- Check all declared required values for missing, empty, or whitespace-only values before export. Throw a clear, simple error without logging supplied values. Empty-string placeholders are only acceptable when this check prevents them from reaching application code.
+- Use `system_environment` with `experimental` or `operational`, and `data_warehouse_connection_string` for the warehouse connection setting. Validate the environment name explicitly and follow section 7 for TypeScript-first validation.
+- Keep credentials in ignored local environment files or the deployment secret store. An `.env.example` template is optional and must contain only non-sensitive placeholders if provided.
+
+### 11.4 Dependencies and Startup Safety
+
+- Add dependencies only when the capability being implemented needs them. Prefer built-in Node functionality and small, direct implementations over additional tooling.
+- Database module imports may construct clients or pools, but must not automatically execute queries, run pipelines, or apply migrations.
+- Keep setup verification, read-only connectivity checks, migration generation, migration application, and pipeline execution as distinct deliberate steps.
+- Document setup choices alongside the relevant project plan or architecture documentation. Do not claim that compilation, connectivity, or isolation is verified unless the corresponding check has succeeded.
 

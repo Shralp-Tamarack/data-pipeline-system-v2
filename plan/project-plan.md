@@ -8,6 +8,8 @@ This is a foundational system, not only a restaurant-report prototype. The resta
 
 This document is the working reference for implementation. Requirements below are targets, not claims about capabilities already implemented. Proposed defaults can change when source evidence warrants it; record those changes here.
 
+For what has actually been built, read [project documentation](../documentation/README.md). For the immediate continuation, read [next steps](next-steps.md). Keep implementation explanations in `documentation/` and future work, open decisions and acceptance gates in `plan/`.
+
 ### Primary priorities
 
 1. Accurate data and explainable business numbers.
@@ -24,23 +26,19 @@ This document is the working reference for implementation. Requirements below ar
 - TypeScript-first compile-time checking; explicit runtime validation for external input. Use Zod only when a concrete runtime schema adds value, not for every internal value or simple configuration check.
 - Neon PostgreSQL for warehouse data and durable pipeline metadata.
 - Drizzle for typed schema definitions, migrations, and appropriate queries; use parameterized SQL where clearer.
-- `node-cron` for centralized schedules.
+- `node-cron` for centralized schedules (chosen, not yet installed or implemented).
 - Raw -> Processed -> Refined, with business-oriented Refined models and reports.
 - Runtime names use `snake_case`; types and table metadata use `Pascal_Snake_Case`; files use kebab-case.
 - Flat shared files in `core/`, with shallow feature/source groups where meaningful.
 - Environment names: `experimental` for building and testing; `operational` for the live system in use. Follow the [Cautious Development Standards](../.github/copilot-instructions.md#10-cautious-development-standards) for isolation, target verification, secret handling, and controlled operational changes.
 
-### Implemented configuration boundary
+### Current delivery position
 
-[System configuration](../core/system/system-configuration.ts) loads the project-root `.env` through dotenv when imported, independently of the command's working directory, without overriding variables already supplied by the process environment. It builds one settings object, checks all its entries for missing or blank values, then exports typed `env_vars` after validation, using plain runtime checks without Zod. Empty strings are temporary missing-value markers only; they cannot pass validation or reach the export. Required settings are `system_environment` and `data_warehouse_connection_string`; local commands do not need `--env-file`. Compiled code retains the same module-relative lookup, so a deployment running compiled output must supply settings through its process environment or deliberately configure its environment-file location.
+The TypeScript/configuration foundation, execution metadata, reusable schema builders and bounded Toast read checks exist. The Raw loader is present and type-checks, but its write/replay transaction behavior has not been verified in a connected sandbox check. No concrete Processed tables, Refined models or scheduler exist.
 
-Missing or blank settings stop startup with a simple missing-environment-variable error. The environment must be `experimental` or `operational`, as required by the environment safety standards. Connection string syntax is not validated here. The module does not connect to a database, authorize operational execution, or prove target isolation. Add future required application settings to the `Env_Vars` type and `env_vars` object; the missing-value check automatically covers every object entry.
+Continue with the [bounded Toast-to-Raw proof](next-steps.md#1-prove-the-bounded-toast-to-raw-path), not a framework rewrite. Current commands, module behavior and verification evidence are maintained in [documentation](../documentation/README.md).
 
-### Implemented execution naming
-
-The [pipeline orchestrator](../core/system/pipeline-orchestrator.ts) exposes `execute_pipeline` to invoke the supplied `perform_pipeline_work` callback and record its outcome. The [execution history helpers](../core/system/pipeline-execution.ts), `record_pipeline_execution_start` and `record_pipeline_execution_completion`, only persist lifecycle metadata; they do not execute source work or advance pipeline progress. This implementation does not yet provide execution locking.
-
-## 2. Architecture
+## 2. Target architecture
 
 ```text
 Manual commands / central node-cron scheduler
@@ -84,7 +82,9 @@ Source-specific code owns authentication, endpoint/query details, record identit
 
 Start with small types and plain functions. No inheritance hierarchy, universal query DSL, unnecessary generics, or automatic discovery of executable jobs.
 
-## 3. Correctness guarantees
+## 3. Required correctness guarantees
+
+These are acceptance requirements. The current implementation does not enforce all of them; see [implemented reliability boundaries](../documentation/architecture.md#reliability-boundary).
 
 ### Identity and idempotency
 
@@ -108,7 +108,7 @@ Start with small types and plain functions. No inheritance hierarchy, universal 
 
 ### Failure behavior
 
-- Record invalid items and transformation errors with safe context. They remain recoverable and make the run partial/failed, not silently successful.
+- Record invalid records and transformation errors with safe context. They remain recoverable and make the run partial/failed, not silently successful.
 - Retry transient timeouts, rate limits, and suitable server/database failures with bounded exponential backoff and jitter; honor `Retry-After`.
 - Authentication, invalid payloads, mapping bugs, and invalid configuration require explicit handling, not unlimited retries.
 - Configure request/query timeouts and cancellation. Propagate cancellation through extraction and processing.
@@ -118,7 +118,7 @@ Start with small types and plain functions. No inheritance hierarchy, universal 
 
 ### Raw
 
-Proposed initial storage is one current payload per logical source record, with source scope/key, source modification/version when available, payload revision, observation/run metadata, and deletion state.
+Retain the chosen latest-state model: one current payload per logical source record. The complete source key includes scope where necessary; there is no mandatory scope column. Reliable source modification/version guards and richer observation metadata remain to be implemented where needed.
 
 - Preserve all fields in the selected source record, including fields not selected for Processed.
 - Keep warehouse provenance separate from the source payload; do not replace original source fields for internal naming convenience.
@@ -149,7 +149,7 @@ Proposed initial storage is one current payload per logical source record, with 
 - Configure historical coverage per source/dataset. The resort launch date may be a default where appropriate, but must not manufacture history or override actual availability.
 - Manual backfills accept explicit date ranges. Changing a configured start date must not silently reset a live checkpoint.
 - Divide large date ranges into bounded windows, initially days where supported.
-- Persist progress per dataset and partition, such as location plus date window, so completed work survives restarts.
+- Persist durable progress so completed work survives restarts. Start with the existing one-row-per-pipeline state; introduce location/window partition progress only when a concrete recovery or concurrency requirement justifies it.
 - Keep backfill progress separate from live incremental progress. Prioritize live freshness and prevent overlapping jobs from racing.
 - Use fixed extraction-window boundaries where sources support them, with source-specific overlap/lookback for late changes.
 - Historical corrections and refunds may arrive outside a short lookback. Document each source's mechanism for catching them: updated-time queries, periodic re-reads, or explicit correction ingestion.
@@ -190,10 +190,10 @@ Use one structured logging API everywhere. Proposed implementation: a standard J
 
 ### Durable metadata
 
-- `Pipeline_Runs`: run ID, task/dataset, operation, trigger, timestamps, status, counts, safe error summary, and configuration/mapping version.
-- `Pipeline_State`: durable checkpoints and independently tracked stage freshness.
-- `Pipeline_Run_Events`: bounded lifecycle/checkpoint/warning/error events linked to runs.
-- `Pipeline_Item_Errors`: source key/revision, processing version, safe error context, and resolution/retry state.
+- Extend the existing `system.pipeline_history` only as needed: execution ID, pipeline, operation, trigger, timestamps, status, counts, safe error summary, and configuration/mapping version.
+- Retain `system.pipeline_progress` for durable checkpoints and independently tracked stage freshness; do not rename/recreate current database identities.
+- Add bounded lifecycle/checkpoint/warning/error event persistence where a concrete operational need requires it.
+- Add recoverable record-level error state with source key/revision, processing version, safe context, and resolution/retry state.
 
 Use explicit foreign keys, delete behavior, indexes for lookups, and retention rules. Run status is historical; current state is not a replacement for an audit trail.
 
@@ -220,27 +220,29 @@ Weekly restaurant net sales versus comparable weeks last year, with a location f
 
 Verify original-order reconstruction in Toast and Info Genesis before implementing the fact. Agree on sales, discounts, refunds, taxes, service charges, voids, timezone, and business-date meanings. Do not assume payment totals equal sales.
 
-The current Toast mapping does not subtract refunds; the current Info Genesis item mapping has no business date. Existing code is reference material, not verified evidence that these gaps are solved.
+The Toast mapping in the previous project does not subtract refunds; its Info Genesis item mapping has no business date. That code is reference material, not evidence that these gaps are solved. This project has no Processed business mapping yet.
 
 ## 10. Delivery sequence and acceptance gates
 
 ### Phase 1 - Contracts and experimental foundation
 
-- Confirm a pilot restaurant, source access, sample records, historical availability, and metric definitions.
-- Set up the isolated experimental database, validated configuration, migrations, structured logger, and test runner.
-- Define source keys, extraction-batch contract, run outcomes, and checkpoint semantics.
+- Retain the completed configuration/schema/execution/read foundation; do not rebuild it.
+- Verify the actual experimental target and required applied migrations before the next write.
+- Prove one bounded Raw page load, unchanged replay, changed-record revisions, atomic committed counts, and rollback as detailed in [next steps](next-steps.md).
+- Confirm complete source keys, source versions, historical availability, and metric definitions; a pilot and read samples already exist.
+- Introduce structured logging and further test support where the next concrete behavior needs them.
 - Review the old implementation for reusable source knowledge; remove old code only deliberately, not as a prerequisite.
-- **Gate:** no operational connection/write path is used accidentally; actual target isolation is verified, and assumptions and unresolved source semantics are documented.
+- **Gate:** actual target isolation is verified; the bounded Raw proof passes without watermark changes; source assumptions and unresolved business semantics are documented.
 
 ### Phase 2 - Durable ingestion core
 
-- Implement runner, run/state metadata, locks, cancellation, Raw bulk upserts, and transactional checkpoints.
+- Extend the existing orchestrator, progress/history and Raw loader with execution locks, cancellation and transactional checkpoints; avoid parallel implementations.
 - Add the Toast adapter with bounded location/date/page traversal.
 - **Gate:** replay and interrupted-run tests produce no duplicates or skipped records; expired cursors safely replay a window.
 
 ### Phase 3 - Processing and first report
 
-- Implement revision-safe processing, item errors, replay, and Processed Toast records.
+- Implement revision-safe processing, record errors, replay, and Processed Toast records using the existing metadata builder.
 - Build restaurant Refined models and the chart's reporting query; choose the report UI tool separately.
 - **Gate:** a completed day's totals reconcile with a trusted Toast report, including explicit refund/void cases.
 
@@ -287,7 +289,7 @@ Use integration tests against a separate Neon experimental database for transact
 
 Resolve before the relevant implementation:
 
-1. Pilot location, trusted comparison reports, and accessible Info Genesis history.
+1. Trusted pilot comparison reports and accessible Info Genesis history; pilot Toast read access is established.
 2. Source key uniqueness, version semantics, date windows, and original-order reconstruction.
 3. Metric/refund definitions, week alignment, timezone, and source cutover coverage.
 4. Latest-state Raw versus required full payload/file history and retention.
@@ -295,4 +297,4 @@ Resolve before the relevant implementation:
 6. Deployment supervisor/hosting, direct Neon lock connection support, and report UI.
 7. Realistic volume, payload-size, memory, and backfill throughput budgets.
 
-**Immediate next step:** resolve source identity/metric questions while building the small experimental foundation. Do not start by deleting everything or designing every future integration.
+**Immediate next step:** establish the complete restaurant/order source key and verify the existing Raw loader with one bounded experimental page and same-payload replay. Follow [next steps](next-steps.md); leave the watermark unchanged until complete-window ingestion exists.

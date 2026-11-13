@@ -12,11 +12,17 @@ dotenv.config({
 type Env_Vars = {
   system_environment : string;
   data_warehouse_connection_string : string;
+  toast_api_host : string; 
+  toast_client_id : string;
+  toast_client_secret : string;
 };
 
 const env_vars : Env_Vars = {
   system_environment : process.env.system_environment ?? "",
-  data_warehouse_connection_string : process.env.data_warehouse_connection_string ?? ""
+  data_warehouse_connection_string : process.env.data_warehouse_connection_string ?? "",
+  toast_api_host : process.env.toast_api_host ?? "",
+  toast_client_id : process.env.toast_client_id ?? "",
+  toast_client_secret : process.env.toast_client_secret ?? "",
 };
 
 if (Object.values(env_vars).some(value => !value.trim())) {

@@ -213,14 +213,25 @@ data interpretation, and technical maintenance.
 ### TypeScript-First Validation
 
 - Default to TypeScript for checks that can be enforced at compile time, including internal contracts, function arguments, return values, and domain models.
-- Validate external values at runtime where TypeScript cannot establish their correctness, including environment variables, API responses, file contents, and database values that are not already validated.
-- Use simple, explicit runtime checks for small requirements. Use Zod only where a concrete runtime-validation need benefits from a schema; do not apply it everywhere or duplicate checks already guaranteed by TypeScript.
+- Validate external values at runtime where TypeScript cannot establish their correctness, including environment variables, API responses, file contents, and database values that are not already validated. Validate the fields and constraints that correctness or safety depends on at the relevant boundary; do not dogmatically model every upstream field or repeat validation already performed.
+- Choose validation pragmatically. Use simple, explicit checks for small requirements; use a library such as Zod when a schema makes nested, repeated, or complex runtime validation clearer and more concise. Infer types from runtime schemas where useful instead of maintaining duplicate type definitions. Do not apply runtime schemas everywhere or duplicate checks already guaranteed by TypeScript.
 - Type annotations and assertions do not validate runtime values. Never cast missing or untrusted input into a valid type to bypass validation.
 - Keep runtime failures clear and explicit without exposing sensitive input values.
 
 ## 8) Documentation Standards (Hierarchical)
 
 **Agent rule:** When code changes, update corresponding documentation in the same turn.
+
+### Planning versus implemented documentation
+
+- **`plan/` describes intended work:** future capabilities, proposed decisions, open questions, implementation order, remaining work, and explicit acceptance checks.
+- **`documentation/` describes what is built:** current architecture, responsibilities, data flows, commands and their effects, important decisions, limitations, and verification evidence. It must help the user and agent quickly return to the project and understand how it works.
+- Do not bury implementation explanations in planning files or describe planned safeguards as implemented guarantees. A short milestone summary in the plan should link to authoritative implementation documentation.
+- When returning to the project, start with the root `README.md`, then read the relevant documentation and plan before recommending or making the next change. Check the code when documentation or prior conversation may be stale.
+- After an implemented capability or completed coached step, update directly related documentation and reconcile the relevant plan in the same turn: reflect completed work, remaining gaps, next steps, and acceptance evidence. When coaching rather than editing, include the corresponding documentation/planning updates in the user's instructions and preserve their control over changes.
+- Distinguish code-inspected behavior, locally verified checks, user-reported results, and unverified live/deployment state. Record important transaction, checkpoint, recovery, environment, and source-data boundaries honestly.
+- Use multiple descriptive kebab-case documents or shallow subfolders when they materially improve understanding. Keep a clear entry point and useful cross-links; avoid unnecessary hierarchy, duplicate descriptions, and unrelated document rewrites.
+- Use relative links to code and related documents without hard-coded source line numbers. Never include credentials, tokens, private connection strings, or source payloads in documentation or plans.
 
 **Degree 1 - Code Itself (Primary)**
 - Write code that's readable without comments: clear names, logical flow, type hints
@@ -239,13 +250,21 @@ data interpretation, and technical maintenance.
 **Degree 4 - Architecture Docs (`/documentation/`)**
 - **architecture.md**: Why this design, module responsibilities, constraints, deployment
 - **data-flow.md**: Detailed flows (Mermaid), edge cases, error handling
+- Keep detailed implementation status, verification evidence, setup, commands, and flows in `documentation/`, accessible through clear links from the root `README.md`
 - Link to code but avoid hard-coding line numbers
 
-**Degree 5 - Root README**
-- Project purpose, quick start, how to run/deploy, link to `/documentation/`
-- Update when commands or deployment changes
+**Degree 5 - Root README (`README.md`)**
+- Keep `README.md` at the repository root as the high-level entrance to the software and its documentation. Preserve this conventional filename despite the general kebab-case file naming rule.
+- Explain what the software does, who it serves, and its current usable scope in plain language. Keep any maturity/limitations summary brief and honest.
+- Provide a concise, safe getting-started path: prerequisites, installation, required configuration guidance, and the supported commands needed for first use. Link to detailed setup, environment protection, operation, and deployment instructions rather than duplicating them.
+- Clearly distinguish offline checks, live source access, and warehouse mutations. Do not present planned commands or unfinished capabilities as available functionality, or make operational execution the default quick start.
+- Provide clear navigation to `documentation/` for how the built software works and how to use it, and to `plan/` for future development and next steps.
+- Keep architecture detail, long implementation-status tables, run-specific verification evidence, troubleshooting detail, and development acceptance gates in their relevant documents. The README is not a conversation transcript, progress journal, or comprehensive implementation manual.
+- Use relative links that resolve from the repository root. When files are moved or renamed, update both their links and incoming references; do not retain links based on their former location.
+- Update the README when purpose, usable capabilities, prerequisites, installation, configuration, public commands, deployment, or documentation navigation changes. Avoid rewriting it for internal-only changes that do not affect its guidance.
 
 **Sync Rule:** Code changes → update Degree 2 & 3. Function/module changes → update Degree 4. Deployment changes → update Degree 5.
+Update comments/JSDoc only where they add value or need correction; synchronize the affected `documentation/` and `plan/` documents whenever implemented behavior or delivery status changes.
 
 ## 9) Pragmatic File Organization
 

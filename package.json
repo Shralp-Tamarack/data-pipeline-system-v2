@@ -8,7 +8,9 @@
     "type-check": "tsc --noEmit",
     "sandbox" : "cd sandbox && node",
     "gen-drizzle-ddl" : "drizzle-kit generate",
-    "exe-drizzle-ddl" : "drizzle-kit migrate"
+    "exe-drizzle-ddl" : "drizzle-kit migrate",
+    "gen-exe-drizzle-ddl" : "npm run gen-drizzle-ddl && npm run exe-drizzle-ddl",
+    "reset-db" : "node scripts/reset-database.ts"
   },
   "keywords": [],
   "author": "",

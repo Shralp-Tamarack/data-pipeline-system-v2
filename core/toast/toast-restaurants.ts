@@ -12,15 +12,18 @@ const toast_restaurant_schema = z.object({
 type Toast_Restaurant_Record = z.infer<typeof toast_restaurant_schema>;
 
 /** Reads accessible restaurant connections without modifying their source fields. */
-export async function get_toast_restaurants(): Promise<Toast_Restaurant_Record[]> {
-  const access_token = await request_toast_access_token();
+export async function get_toast_restaurants(signal? : AbortSignal): Promise<Toast_Restaurant_Record[]> {
+  signal?.throwIfAborted();
+  const access_token = await request_toast_access_token(signal);
 
   const response = await fetch(
     new URL("/partners/v1/restaurants", env_vars.toast_api_host),
     {
       method : "GET",
       redirect : "error",
-      signal : AbortSignal.timeout(20_000),
+      signal : signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(20_000)])
+        : AbortSignal.timeout(20_000),
       headers : {
         Authorization : `Bearer ${access_token}`,
         Accept : "application/json"
@@ -40,5 +43,6 @@ export async function get_toast_restaurants(): Promise<Toast_Restaurant_Record[]
     throw new Error("Toast returned an invalid restaurant list.");
   }
 
+  signal?.throwIfAborted();
   return validation_result.data;
 }

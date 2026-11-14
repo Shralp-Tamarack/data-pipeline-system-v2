@@ -220,7 +220,7 @@ data interpretation, and technical maintenance.
 
 ## 8) Documentation Standards (Hierarchical)
 
-**Agent rule:** When code changes, update corresponding documentation in the same turn.
+**Agent rule - Explicit, batched documentation updates:** Do not automatically update `documentation/`, `plan/`, or the root `README.md` after each code change, completed coached step, or reported test result. Wait until the user explicitly requests a documentation/planning refresh, typically before a commit or at a milestone. A commit request alone is not authorization to refresh documentation.
 
 ### Planning versus implemented documentation
 
@@ -228,7 +228,7 @@ data interpretation, and technical maintenance.
 - **`documentation/` describes what is built:** current architecture, responsibilities, data flows, commands and their effects, important decisions, limitations, and verification evidence. It must help the user and agent quickly return to the project and understand how it works.
 - Do not bury implementation explanations in planning files or describe planned safeguards as implemented guarantees. A short milestone summary in the plan should link to authoritative implementation documentation.
 - When returning to the project, start with the root `README.md`, then read the relevant documentation and plan before recommending or making the next change. Check the code when documentation or prior conversation may be stale.
-- After an implemented capability or completed coached step, update directly related documentation and reconcile the relevant plan in the same turn: reflect completed work, remaining gaps, next steps, and acceptance evidence. When coaching rather than editing, include the corresponding documentation/planning updates in the user's instructions and preserve their control over changes.
+- When the user explicitly requests a refresh, reconcile documentation and plans against the current code and verification evidence as one coherent batch: reflect retained changes, completed work, remaining gaps, next steps, and acceptance evidence. Do not document reverted experiments as implemented behavior. When coaching, do not add documentation/planning chores to every step.
 - Distinguish code-inspected behavior, locally verified checks, user-reported results, and unverified live/deployment state. Record important transaction, checkpoint, recovery, environment, and source-data boundaries honestly.
 - Use multiple descriptive kebab-case documents or shallow subfolders when they materially improve understanding. Keep a clear entry point and useful cross-links; avoid unnecessary hierarchy, duplicate descriptions, and unrelated document rewrites.
 - Use relative links to code and related documents without hard-coded source line numbers. Never include credentials, tokens, private connection strings, or source payloads in documentation or plans.
@@ -260,11 +260,10 @@ data interpretation, and technical maintenance.
 - Clearly distinguish offline checks, live source access, and warehouse mutations. Do not present planned commands or unfinished capabilities as available functionality, or make operational execution the default quick start.
 - Provide clear navigation to `documentation/` for how the built software works and how to use it, and to `plan/` for future development and next steps.
 - Keep architecture detail, long implementation-status tables, run-specific verification evidence, troubleshooting detail, and development acceptance gates in their relevant documents. The README is not a conversation transcript, progress journal, or comprehensive implementation manual.
-- Use relative links that resolve from the repository root. When files are moved or renamed, update both their links and incoming references; do not retain links based on their former location.
-- Update the README when purpose, usable capabilities, prerequisites, installation, configuration, public commands, deployment, or documentation navigation changes. Avoid rewriting it for internal-only changes that do not affect its guidance.
+- Use relative links that resolve from the repository root. During a requested refresh, reconcile links and incoming references for moved or renamed files; do not retain links based on their former location.
+- During a requested refresh, update the README for retained changes to purpose, usable capabilities, prerequisites, installation, configuration, public commands, deployment, or documentation navigation. Avoid rewriting it for internal-only changes that do not affect its guidance.
 
-**Sync Rule:** Code changes → update Degree 2 & 3. Function/module changes → update Degree 4. Deployment changes → update Degree 5.
-Update comments/JSDoc only where they add value or need correction; synchronize the affected `documentation/` and `plan/` documents whenever implemented behavior or delivery status changes.
+**Sync Rule:** Keep directly affected code comments and public JSDoc accurate where they add value. Batch updates to Degree 4 & 5 and `plan/` only when explicitly requested; do not perform automatic per-change documentation synchronization.
 
 ## 9) Pragmatic File Organization
 
@@ -306,7 +305,7 @@ A directory should reduce organizational complexity, not merely relocate it. Whe
 - In this repository, put shared standalone files directly in `core/` and feature-related files in `core/<feature>/`. Do not add a generic `modules/` layer or nest category directories inside a feature without a documented concrete exception.
 - Put ad hoc connection checks, exploratory tests, and other non-core experiments in the existing `sandbox/` directory with descriptive filenames. Include sandbox TypeScript files in type-checking; do not execute them automatically during builds.
 - Colocate each source system's pipelines, extractor constructors, authentication, connection code, and orchestrator when they belong to that integration. Keep filenames meaningful on their own.
-- During authorized restructuring, preserve runtime logic, exported symbols, commands, database identities, schedules, and source contracts. Update imports, schema-discovery paths, documentation, and tests together; do not generate or apply migrations solely for file moves.
+- During authorized restructuring, preserve runtime logic, exported symbols, commands, database identities, schedules, and source contracts. Update imports, schema-discovery paths, and tests together; reconcile documentation during the next explicitly requested refresh. Do not generate or apply migrations solely for file moves.
 - Preserve externally defined and tooling-required filenames such as `package.json`, `tsconfig.json`, and migration metadata rather than renaming them for conformity.
 
 ### Overarching Principle
@@ -401,5 +400,5 @@ Protect the live application, warehouse, source systems, and users while develop
 - Add dependencies only when the capability being implemented needs them. Prefer built-in Node functionality and small, direct implementations over additional tooling.
 - Database module imports may construct clients or pools, but must not automatically execute queries, run pipelines, or apply migrations.
 - Keep setup verification, read-only connectivity checks, migration generation, migration application, and pipeline execution as distinct deliberate steps.
-- Document setup choices alongside the relevant project plan or architecture documentation. Do not claim that compilation, connectivity, or isolation is verified unless the corresponding check has succeeded.
+- During an explicitly requested refresh, document retained setup choices alongside the relevant project plan or architecture documentation. Do not claim that compilation, connectivity, or isolation is verified unless the corresponding check has succeeded.
 

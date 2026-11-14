@@ -1,69 +1,76 @@
 # Next implementation steps
 
-Read [current status](../documentation/README.md) first. This file is the short continuation guide; the [project plan](project-plan.md) retains the broader requirements.
+## Where we stopped
 
-## 1. Prove the bounded Toast-to-Raw path
+As of the November 13, 2026 documentation refresh:
 
-**Starting point:** [get_toast_order_page](../core/toast/toast-orders.ts) reads one page; [load_raw_records](../core/system/raw-pipeline-loader.ts) exists and type-checks. No sandbox connects them and no Raw write/replay has been verified.
+- Shared ingestion, bounded Toast pagination/Raw loading, and a one-process per-pipeline busy guard are implemented.
+- Initial history and ongoing ingestion use one flow and one pipeline watermark.
+- Each source owns its `data_start_date`; Toast starts at January 1, 2026, midnight UTC when no watermark exists.
+- Configured Toast orders ingestion covers all discovered restaurants before checkpointing each window.
+- Type-check and the selected 39 offline tests passed. Prior connected checks were user-run; full evidence is in [setup and commands](../documentation/setup-and-commands.md#what-has-been-verified).
+- Connected completed-window checkpoint/restart behavior and full historical Toast ingestion have **not** been verified.
 
-**Outcome:** one explicitly authorized, manually run experimental page load with repeatable assertions. Do not add full pagination, processing, scheduling or watermark advancement in this step.
+Read [architecture](../documentation/architecture.md) and [data flow](../documentation/data-flow.md#4-resumable-ingestion) before continuing. No reset, new schema or migration is required by the latest ingestion changes.
 
-Before writing:
+## 1. Verify checkpoints and restart against the experimental warehouse
 
-- Verify the actual isolated experimental database/credential target and the necessary applied migrations. A label alone is insufficient.
-- Confirm the approved source-data scope and access controls. Do not broaden a pilot-page approval into backfill or operational ingestion.
-- Establish an unambiguous stable key containing restaurant context and order GUID. Proposed representation: `JSON.stringify([restaurant_guid, order_record.guid])`. Confirm it before implementation; do not add a mandatory scope column or modify the source payload.
+**Next coding task:** add a focused synthetic connected check for configured ingestion. Do not start by running all historical Toast data.
 
-Add a narrowly scoped manual Raw check in [sandbox](../sandbox/):
+Use a dedicated synthetic pipeline/Raw table or another explicitly reviewed isolated fixture. Do not advance the real `toast_orders` watermark with synthetic records; doing so could skip source data on the next real run. Review any fixture DDL before applying it, and preserve unrelated warehouse state.
 
-1. Fetch the already selected pilot page once, outside a database transaction, with at most ten orders.
-2. Convert records to loader inputs with complete source keys and unchanged source content.
-3. Use the stable pipeline name from [toast-schema.ts](../core/toast/toast-schema.ts) and start history through the existing orchestrator.
-4. Load the page, capture affected Raw records/counts, then replay the **same in-memory inputs**.
-5. Close the warehouse pool in `finally`. Log safe counts/assertion outcomes only.
+The existing [executer check](../sandbox/check-ingestion-executer.ts) verifies explicit-range work and intentionally leaves progress unchanged. It is not the new connected checkpoint check.
 
 ### Acceptance checks
 
-- A new identity creates one row at revision 1 and remains pending processing.
-- Replaying identical inputs adds zero changes and preserves Raw ID, creation/update times, execution ID, revision and processing state.
-- The first load is not assumed to insert ten rows: existing pilot records may already match or differ. Assert history increments against actual committed insert/change counts.
-- A controlled synthetic payload change preserves identity, increments revision exactly once and resets `processed`; repeating that changed payload does not increment it again.
-- Duplicate/blank identities, excessive batches, and missing/finished/wrong-pipeline executions fail explicitly without committed data/count changes.
-- An actual mid-transaction database failure rolls back both Raw changes and the history increment. Use a controlled experimental integration case, not just pre-transaction invalid-input rejection as a proxy.
-- Pipeline watermark and successful-stage timestamps remain unchanged throughout this page-only test.
+1. With no watermark, extraction starts at the source's `data_start_date`.
+2. Each completed window saves matching progress/history boundaries after all required pages/scopes finish, including a valid empty-data window.
+3. A second-window or later-restaurant failure retains the first completed checkpoint and already committed Raw batches.
+4. A fresh process resumes at the saved boundary, replays incomplete work without duplicate identities, and does not re-fetch completed windows.
+5. A checkpoint transaction failure cannot leave progress ahead of history or durable data.
+6. Success, failure and cancellation retain accurate committed-change counts and honest status.
+7. Explicit-range checks do not advance normal progress.
+8. Cleanup targets only named synthetic fixtures; preserve real progress/history/source records.
 
-Use synthetic records in the isolated experimental warehouse for mutation/rollback cases; never alter live Toast records or source systems. Avoid leaking payloads through assertion diagnostics. Document the resulting evidence and remaining gaps in [documentation](../documentation/README.md) when this gate passes.
+Before connected execution, the user approves the actual experimental target, fixture scope and mutations. Use synthetic data, verify actual database/credential isolation, and keep one writer. Report any incomplete verification honestly; offline fake persistence is not proof of PostgreSQL transaction behavior.
 
-## 2. Make complete ingestion recoverable
+## 2. Prepare a controlled real Toast ingestion
 
-After the Raw batch gate, implement these in small verified steps:
+After the connected checkpoint gate:
 
-1. Decide source identity/version semantics, supported historical coverage, and fixed modification-time windows. Keep business-date samples separate from incremental watermarks.
-2. Add bounded pagination: parse `Link`, validate permitted HTTPS origin/path, detect repeated pages/cursors, and bound pages, response bytes, batch size and total work.
-3. Reuse a token within bounded work, handle expiry explicitly, and add bounded retries/backoff with `Retry-After`, timeouts and cancellation. Bound authentication response bytes too.
-4. Prevent full-execution overlap through a reviewed database-backed locking approach. Verify direct Neon connection support before choosing session advisory locks; batch row locks and process-local cron settings are insufficient.
-5. Test lock loss and stop/reject subsequent work before permitting multiple workers. Prevent older backfill/source revisions from overwriting newer Raw content.
-6. Commit resumable batch progress atomically where implemented, and advance the completed-window watermark only after all required restaurant pages are durable. Start from one progress row per pipeline; introduce finer-grained state only for concrete recovery/concurrency needs.
-7. Add late-change lookback/correction handling and separate bounded backfill progress before allowing backfill alongside live sync.
+- Reconfirm the desired `data_start_date`, accessible restaurants and any preexisting watermark/context. Do not silently reset them.
+- Confirm historical availability and modification-time behavior. January 1 is the user-selected default, not independently verified source history.
+- Bound the first approved run's work/cancellation budget and source request rate. Loading from January to now can make many requests with the current ten-record pages.
+- Add required bounded transient retries, `Retry-After` handling, token-expiry handling and authentication response bounds before relying on unattended long-running work.
+- Decide source-version and late-change correction behavior from source evidence; do not claim complete freshness from a changing pagination stream alone.
+- Handle changing restaurant scope deliberately: a new accessible restaurant needs older-date replay, not silently inheriting previous all-restaurant coverage.
+- Verify saved coverage, Raw identities/counts, and interruption/resume before authorizing broader history or operational use.
 
-**Gate:** replay, interruptions, later-page failures, source/database outages and lock loss do not skip records or claim uncompleted coverage. Committed counts remain accurate.
+Keep the default model simple: **saved watermark or source start -> captured now -> completed-window checkpoints**. No separate historical executer or default backfill state.
 
 ## 3. Build useful Processed records
 
-Before choosing business columns, inspect authorized source evidence and agree on order/check reconstruction, business date/timezone, exact monetary values, discounts, refunds, voids, taxes and service charges.
+Agree on trusted source comparisons, original-order/split-check relationships, business dates/timezones, exact monetary values, discounts, refunds, voids, taxes and service charges.
 
-- Define the first concrete Processed table using [create_processed_columns](../core/system/system-schema.ts); add needed business identity constraints and foreign-key lookup indexes.
-- Implement bounded pending-record selection and a specific mapper, not an abstract processing platform.
-- Commit Processed output and acknowledgment of the exact Raw revision together.
-- Prove that a newer Raw revision remains pending if it arrives during processing.
-- Add mapping-version replay and recoverable record-level error handling.
+- Define the first concrete Processed table using the existing metadata builder and explicit business identities/indexes.
+- Implement bounded pending-record selection and a specific mapper.
+- Commit output and acknowledgment of the exact Raw revision together.
+- Prove newer revisions stay pending and mapping-version replay works.
+- Record recoverable failures with safe diagnostic context.
 
-**Gate:** a completed day's records reconcile to a trusted Toast report, including explicit refund/void/split-check cases. Do not equate payment totals with net sales or silently treat missing amounts as zero.
+**Gate:** a completed day's results reconcile to a trusted Toast report. Payment totals are not automatically net sales.
 
-## 4. Continue the broader plan
+## 4. Scheduling, second-source proof and operational readiness
 
-Build business-oriented Refined models and report freshness, verify historical/second-source coverage, then scheduling and operational readiness with restart/catch-up/shutdown checks. A second real source and a file/database case must demonstrate reuse before generalizing the framework.
+- Add the chosen `node-cron` dependency only when implementing the scheduler; use an explicit registry and one supervised worker.
+- Reuse the same ingestion functions for scheduled and manual invocation.
+- Add bounded shutdown, catch-up, abandoned-history recovery, structured safe diagnostics and practical freshness alerts.
+- Preserve the one-process guard: no standalone ingestion while the worker runs; stop the old worker before its replacement starts. Revisit database-wide coordination only if multiple processes become a requirement.
+- Prove reuse with a second integration and later a real file/database case before generalizing.
+- Build business-oriented Refined models, reporting queries and published freshness after Processed correctness.
 
-Resolve deployment, cadence, retention, publication behavior, alerting and measurable volume/memory/freshness targets before their relevant implementation gates. See [delivery sequence](project-plan.md#10-delivery-sequence-and-acceptance-gates).
+See the [project plan](project-plan.md#10-delivery-sequence-and-acceptance-gates) for broader gates. Operational schedules, migrations, corrections, resets and historical runs require specific target/scope approval and recovery preparation.
 
-Do not enable operational schedules, run broad backfills or apply operational migrations without specific user approval and recovery preparation.
+## Working agreement
+
+The assistant implements requested code changes and explains what changed and why for user review. Source access and consequential database/operational actions need separate authorization. Refresh documentation/plans in an explicitly requested batch, not as a routine per-step chore.

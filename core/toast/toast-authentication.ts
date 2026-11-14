@@ -11,7 +11,11 @@ const toast_authentication_response_schema = z.object({
 });
 
 /** Requests a Toast token without logging credentials or response contents. */
-export async function request_toast_access_token(): Promise<string> {
+export async function request_toast_access_token(
+  signal? : AbortSignal
+): Promise<string> {
+  signal?.throwIfAborted();
+
   if (!URL.canParse(env_vars.toast_api_host)) {
     throw new Error("Invalid toast_api_host.");
   }
@@ -31,7 +35,9 @@ export async function request_toast_access_token(): Promise<string> {
     {
       method : "POST",
       redirect : "error",
-      signal : AbortSignal.timeout(20_000),
+      signal : signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(20_000)])
+        : AbortSignal.timeout(20_000),
       headers : {
         "Content-Type" : "application/json",
         Accept : "application/json"

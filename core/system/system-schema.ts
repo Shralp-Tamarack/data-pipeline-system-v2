@@ -108,6 +108,8 @@ export function create_raw_table(pipeline_name : string) {
 
     source_record_id : text("source_record_id").notNull(),
 
+    source_context : jsonb("source_context").$type<Record<string, unknown>>(),
+
     content : jsonb("content").notNull(),
 
     record_source : text("record_source")

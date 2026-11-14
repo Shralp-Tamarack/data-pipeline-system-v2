@@ -6,7 +6,7 @@
 
 [tsconfig.json](../tsconfig.json) enables strict application checking, `noUncheckedIndexedAccess`, NodeNext modules and erasable TypeScript syntax. Source imports use `.ts`; `rewriteRelativeImportExtensions` changes them to `.js` in compiled output. `skipLibCheck` skips dependency declaration internals, not application source checking.
 
-Source code is in [core](../core/). Manually invoked checks and offline tests are in [sandbox](../sandbox/). Compiled output goes to `dist/`. There is no scheduler start command or implemented application entry point yet.
+Source code is in [core](../core/). Manually invoked checks and offline tests are in [sandbox](../sandbox/), and deliberate maintenance scripts are in [scripts](../scripts/). All three TypeScript areas are included in checking/build output. Compiled output goes to `dist/`; builds do not execute sandbox files. There is no scheduler start command or implemented application entry point yet.
 
 ## Required settings
 
@@ -30,6 +30,16 @@ Keep private settings in an ignored local file or an approved deployment secret 
 
 The standard's environment variable is `system_environment`. Do not infer the warehouse target from `NODE_ENV`.
 
+## Source ingestion configuration
+
+[toast-configuration.ts](../core/toast/toast-configuration.ts) exports `toast_configuration` with `data_start_date : new Date("2026-01-01T00:00:00.000Z")`. This non-secret source setting is not a new required environment variable. The shared environment object still owns connection/authentication settings.
+
+Configured ingestion starts at the pipeline watermark, otherwise this date, and captures now once for the run end. The first run naturally loads history; subsequent runs use the same flow. Changing the start date does not reset a saved watermark.
+
+[ingest_toast_orders](../core/toast/toast-ingestion.ts) is an implemented function requiring an `AbortSignal`, not an installed command or scheduler. It loads all discovered restaurants and advances completed-window progress. Do not call it as an ordinary setup check: with no watermark it can read from January to now and write source data/progress. Its connected checkpoint and full-history behavior are not yet verified.
+
+Explicit-date sandbox checks still use the same window/extractor/loader path without advancing normal progress. They have their own bounded check ranges; their two-minute budgets are not a system-wide historical-ingestion limit.
+
 ## Commands and their effects
 
 Run these from the repository root after installing the declared dependencies with npm as needed. Do not execute all sandbox checks as a blanket test suite: some access live sources and others write warehouse metadata.
@@ -39,19 +49,34 @@ Run these from the repository root after installing the declared dependencies wi
 | `npm run type-check` | Compile-time checking only; no emitted files or pipeline execution |
 | `npm run build` | Writes compiled output to `dist/`; does not run the application |
 | `node --test .\sandbox\toast-response.test.ts` | Four offline synthetic-data tests; no configuration import, credentials, network or warehouse |
+| `node --test .\sandbox\reset-database.test.ts` | Offline reset-guard tests with a fake database client; no real configuration, network or warehouse |
+| `node --test .\sandbox\ingestion-executer.test.ts .\sandbox\pipeline-progress.test.ts .\sandbox\ingestion-windows.test.ts .\sandbox\pipeline-orchestrator.test.ts .\sandbox\toast-order-extractor.test.ts .\sandbox\toast-order-pagination.test.ts .\sandbox\toast-response.test.ts` | Selected 39 offline tests for configured ingestion/recovery, checkpoint transaction control, busy guard, windows and bounded extraction; synthetic configuration/persistence, no live source or warehouse |
 | `npm run sandbox check-warehouse.ts` | Experimental-label guard; executes read-only `SELECT 1` |
 | `npm run sandbox check-pipeline-progress.ts` | Experimental-label guard; inserts missing synthetic pipeline progress and verifies repeated registration |
 | `npm run sandbox check-pipeline-execution.ts` | Experimental-label guard; writes synthetic progress/history, checks lifecycle and duplicate-finish rejection |
-| `npm run sandbox check-pipeline-orchestrator.ts` | Experimental-label guard; writes synthetic success/failure history and a simulated committed count |
+| `npm run sandbox check-pipeline-orchestrator.ts` | Experimental-label guard; writes synthetic success/failure history and a simulated committed count; verifies duplicate rejection, independent pipeline and restart |
 | `npm run sandbox check-toast-authentication.ts` | Experimental-label guard; live Toast login; token not printed |
 | `npm run sandbox check-toast-restaurants.ts` | Experimental-label guard; live login and discovery; prints accessible restaurant identifiers/names and count |
 | `npm run sandbox check-toast-orders.ts` | Experimental-label guard; live login and one pilot order page; no warehouse writes |
+| `npm run sandbox check-toast-raw-loading.ts` | Experimental-label guard; live pilot page read, Raw writes and same-payload replay assertions; leaves records/history in the warehouse |
+| `npm run sandbox check-raw-loader-safety.ts` | Synthetic warehouse writes/deletes and history updates; checks revisions/replay/context rollback and count-overflow rollback; restores artificial count, removes exact synthetic Raw records, retains history; no Toast access |
+| `npm run sandbox check-toast-order-window.ts` | Live Toast read of one configured pilot restaurant/window; page/count logs only, no warehouse import or progress write |
+| `npm run sandbox check-toast-window-ingestion.ts` | Live pilot-window Toast reads and Raw writes; explicit range leaves normal progress unchanged; earlier batches may remain on failure |
+| `npm run sandbox check-ingestion-executer.ts` | Synthetic Raw/history writes for explicit-range success, second-window failure and cancellation; deletes exact synthetic Raw records, retains history and leaves normal progress unchanged |
 | `npm run gen-drizzle-ddl` | Loads required configuration and generates migration files locally; does not apply them |
 | `npm run exe-drizzle-ddl` | Loads required configuration and applies migrations to the selected database; **consequential warehouse mutation** |
+| `npm run gen-exe-drizzle-ddl` | Generates migration files and then applies migrations to the selected database; review migrations and verify the target before using |
+| `npm run reset-db` | **Irreversible:** interactively drops experimental project schemas and deletes local generated migrations; see below |
 
-The sandbox npm script changes directory into `sandbox` and invokes Node, so pass a bare filename rather than a repository-root path. There is no Raw-loader sandbox check yet.
+The sandbox npm script changes directory into `sandbox` and invokes Node, so pass a bare filename rather than a repository-root path.
 
-Metadata checks leave their synthetic records in the selected database and append history on repeated runs. They are not rollback-only tests. They close the pool in `finally`.
+[The Raw loading check](../sandbox/check-toast-raw-loading.ts) reads the same pilot restaurant/business date as the order-page check. It stores exact order GUIDs, separate restaurant context and unchanged payloads. It compares the first load to existing rows, verifies new/changed/unchanged behavior, replays the same in-memory records, checks committed history counts and asserts that pipeline progress is unchanged. Empty pages fail rather than claiming replay was verified. Assertions compare payloads as booleans so failure diagnostics do not dump source data.
+
+Run only against an independently verified isolated experimental target with approved source-data scope. Existing records with missing/conflicting context cause rejection; no automatic correction is performed. A failed assertion does not undo a previously committed first load.
+
+The central busy guard protects calls through the orchestrator within one process only. Some lower-level sandbox checks call history/loader helpers directly. Do not run any connected writer alongside the worker or another terminal writer. Stop the old worker before replacing it; cross-process coordination is not implemented.
+
+Metadata checks leave their synthetic progress/history in the selected database and append history on repeated runs. The two synthetic Raw safety/executer checks remove their named synthetic Raw rows, not all metadata. These are not rollback-only tests. Connected warehouse scripts own pool shutdown.
 
 ## Migrations
 
@@ -59,13 +84,25 @@ Metadata checks leave their synthetic records in the selected database and appen
 
 | Generated migration | Content |
 | --- | --- |
-| [0000_spicy_ronan.sql](../drizzle-generated-ddl/0000_spicy_ronan.sql) | System schema, execution-status enum, progress/history, foreign key and index |
-| [0001_salty_prima.sql](../drizzle-generated-ddl/0001_salty_prima.sql) | Raw schema and `raw.toast_orders`, identity/pending/execution indexes and history foreign key |
-| [0002_unusual_random.sql](../drizzle-generated-ddl/0002_unusual_random.sql) | Processed schema only; no Processed tables |
+| [0000_modern_tattoo.sql](../drizzle-generated-ddl/0000_modern_tattoo.sql) | Fresh baseline: system/progress/history, Raw Toast orders including context, Processed schema, foreign keys and indexes |
 
 Drizzle builders do not create database objects during import. Export schemas, enums and concrete table definitions so Kit can discover them. Reusable functions are not substitutes for exported concrete tables.
 
+The user confirmed an experimental reset, application of the new baseline and verification of the actual experimental target. The baseline SQL was inspected locally; live database state and credential isolation were not independently checked by the agent.
+
 Generate, inspect and deliberately apply migrations. Preserve applied SQL and migration metadata; do not reset/recreate migrations for convenience or file moves. Live application status was not independently inspected during the documentation refresh.
+
+## Experimental database reset
+
+`npm run reset-db` uses [reset-database.ts](../scripts/reset-database.ts). It refuses any environment except `experimental`, requires an interactive terminal and proceeds only when the input is exactly `reset`. Cancellation and non-interactive input do not open a database connection. The application environment and all other required shared configuration must still be valid.
+
+If confirmed, one `DROP SCHEMA IF EXISTS ... CASCADE` statement drops `system`, `raw`, `processed`, `refined`, and `drizzle` with their tables, data and database migration history. `CASCADE` can also remove dependent objects in other schemas. `public`, other schemas, PostgreSQL system schemas and the database itself are not explicitly dropped.
+
+After a successful database reset and pool shutdown, the command recursively deletes the repository's `drizzle-generated-ddl` folder, including its SQL files, metadata and any uncommitted changes. It refuses to delete a migration path that is a symbolic link or not a directory. It does not delete the folder if the database reset fails or its outcome is unknown. If folder deletion or pool shutdown fails after the database reset, it reports the partial failure; inspect both states before taking recovery action.
+
+This removes local migration history used for **all** environments, not just the experimental database. Preserve a usable backup of the folder and coordinate migration history with any other databases before resetting. Recreate and review migration files deliberately for the reset database; do not blindly apply a new baseline to a database that has the old history. Never reset operational data or delete shared migration history as a shortcut for file moves.
+
+**The environment label and confirmation are not proof of isolation or target identity.** Before running the command, independently verify the actual Neon project/branch/database and credential scope without printing the connection string. Confirm the full scope and dependencies, a usable backup/restore point and recovery plan. Do not run this command against operational data. Offline guard tests use a fake client; the user subsequently confirmed an experimental reset and baseline application, not an agent-run live test.
 
 ## Before live access or any database mutation
 
@@ -80,4 +117,40 @@ The current code validates names and places experimental guards in sandbox check
 
 ## What has been verified
 
-See the [status and evidence](README.md#verification-evidence) for the last local checks and earlier user-reported live results. Passing type-check or response-reader tests is not proof of transaction behavior, complete source coverage, financial correctness or operational readiness.
+### Local offline verification
+
+On November 13, 2026, after configured ingestion/checkpoint implementation:
+
+- `npm run type-check` passed.
+- The selected seven-file test command above passed **39 tests**, including parent test counts.
+- Coverage includes initial source-date loading, fixed run end, watermark resumption, later-page/restaurant failure, cancellation/load/checkpoint failure, explicit-range compatibility, expected-checkpoint predicates and synthetic transaction rollback, overlap release paths, window boundaries, strict links and bounded JSON reads.
+- The reset-guard tests passed earlier using copied code and a fake database client; they were not part of the 39-test command.
+
+These tests use synthetic persistence/configuration. The checkpoint suite exercises the real helper against a fake transaction; it does not establish actual PostgreSQL locking/rollback behavior. The documentation-only refresh did not rerun tests or make live requests.
+
+### User-reported connected results
+
+The following successful outputs were supplied during development on November 13:
+
+| Check | Reported result / boundary |
+| --- | --- |
+| Experimental baseline | User confirmed reset, generated baseline application and target verification; no agent live inspection |
+| Warehouse/progress/history foundation | Connectivity, repeated progress registration and execution lifecycle checks succeeded |
+| Toast discovery/page | Accessible restaurant discovery and a ten-order pilot page succeeded |
+| Pilot Raw load/replay | 10 fetched, 10 Raw changes, zero same-payload replay changes; identity/context/history/progress assertions passed |
+| Synthetic Raw safety | Payload revision/reset/replay, whole-batch context rollback, actual PostgreSQL count-overflow rollback and finished-execution rejection passed; progress unchanged |
+| Read-only Toast window | November 11-12 UTC: five nonempty pages (10, 10, 10, 10, 4), 44 orders; no warehouse writes |
+| Explicit-window Toast ingestion | 38 Raw changes; progress unchanged and no processing |
+| Synthetic explicit-window executer | Success: 2 committed records; later-window failure: 1; cancellation: 1; expected history/boundaries, unchanged progress |
+| Process-local overlap | Duplicate rejected, independent pipeline completed and same pipeline restarted |
+
+The 44 fetched orders and 38 Raw changes are different measures, not evidence of missing records: unchanged existing payloads contribute zero changes. They are separate reported runs, not a source snapshot/reconciliation.
+
+### Still unverified or unresolved
+
+- Connected configured-ingestion checkpoints, fresh-process recovery and full historical/all-restaurant coverage.
+- Concurrent context conflicts, source-version ordering, late-arriving changes and changes in accessible restaurant scope.
+- Processed/financial correctness, report freshness, operational isolation enforcement and deployment readiness.
+- Abandoned-running-history recovery, structured original-cause diagnostics and immediate database-query cancellation.
+
+The supplied connected output repeatedly included the tail of a PostgreSQL SSL compatibility warning. The full warning/cause has not been inspected; no SSL setting was changed or warning suppressed. Checks completed despite the warning. Investigate it separately without printing the connection string or weakening certificate verification.

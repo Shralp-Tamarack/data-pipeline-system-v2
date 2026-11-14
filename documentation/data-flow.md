@@ -1,101 +1,127 @@
 # Current data flows
 
-Read [architecture](architecture.md) for schemas and [next steps](../plan/next-steps.md) for the work needed to connect these flows.
+See [architecture](architecture.md) for module/schema ownership, [setup and commands](setup-and-commands.md) for effects and evidence, and [next steps](../plan/next-steps.md) for remaining implementation.
 
-## 1. Read-only Toast checks
+## 1. Source reads
 
-```mermaid
-flowchart TD
-    A[Manual Toast sandbox check] --> B[Validate shared configuration and experimental label]
-    B --> C[Authenticate with Toast]
-    C --> D[Read restaurant connections or one order page]
-    D --> E[Bound response bytes and validate external JSON]
-    E --> F[Print selected diagnostic metadata]
-```
+The business-date pilot reader reads one page without warehouse access. The modification-time extractor follows all validated pages for a requested restaurant/window, yielding bounded nonempty batches. [The read-only window check](../sandbox/check-toast-order-window.ts) uses an explicit one-day range and a two-minute overall deadline; this deadline is a check budget, not a default historical-ingestion duration.
 
-There is **no warehouse write or progress update** in this flow. Restaurant discovery prints accessible restaurant identifiers/names and a count; order checking prints a count, pagination-header presence and first-order field names. Neither prints tokens or order/customer payload values.
+Toast requests use 20-second timeouts plus caller cancellation. Order responses are capped at 4 MiB; discovery at 1 MiB. The streamed [response reader](../core/toast/toast-response.ts) handles split UTF-8, cancels oversized bodies and redacts JSON parse errors. Authentication does not yet use that byte cap.
 
-The order check uses the pilot restaurant/business date configured in [check-toast-orders.ts](../sandbox/check-toast-orders.ts). It reads page 1 only. Ten returned orders or a pagination header does not establish complete source coverage.
+Safe page/count diagnostics do not log tokens or order payloads. Reading one restaurant/window proves neither all-restaurant coverage nor report freshness.
 
-## 2. Execution lifecycle
+## 2. Execution lifecycle and busy protection
 
 ```mermaid
 flowchart TD
-    A[execute_pipeline] --> B[Get or create pipeline progress]
-    B --> C[Insert running history with watermark before]
-    C --> D[Call perform_pipeline_work with execution ID]
-    D -->|Returns outcome| E[Persist succeeded, partial or cancelled]
-    D -->|Throws| F[Persist failed with generic safe summary]
-    F --> G[Throw execution-ID failure]
+    A[execute_pipeline] --> B{Pipeline active in this process?}
+    B -->|Yes| R[Reject before history registration]
+    B -->|No| C[Mark active synchronously]
+    C --> D[Register progress and running history]
+    D --> E[Execute supplied work]
+    E -->|Returns| F[Persist terminal outcome]
+    E -->|Throws| G[Persist failed outcome and throw execution-ID error]
+    D --> H[Finally clear busy guard]
+    F --> H
+    G --> H
 ```
 
-[The orchestrator](../core/system/pipeline-orchestrator.ts) executes only the supplied callback. It does not discover pipelines, fetch source records, load Raw, calculate a watermark or process records automatically.
+[The orchestrator](../core/system/pipeline-orchestrator.ts) handles supplied work and outcome persistence, not source discovery or checkpoint calculation. `finally` clears the busy flag on every exit, including history-start/completion failures. Different pipeline names remain independent.
 
-[History completion](../core/system/pipeline-history.ts) permits one transition from running to a terminal status. Optional metadata can be supplied by callers; omission does not reset previously committed counts.
+One worker/process is the operating assumption. Do not run standalone ingestion while that worker is active; stop the old process before replacement. The guard is not cross-process locking and does not recover abandoned history.
 
-### Failure boundaries
-
-- A callback failure does not undo earlier committed batch transactions.
-- The failed attempt retains its previously committed counts when completion omits them.
-- The orchestrator records a generic redacted summary and throws an error containing the execution ID; detailed original-cause diagnostics are not currently preserved by it.
-- If required history persistence fails, that error surfaces. A durable terminal status is not guaranteed and the attempt can remain running.
-- There is no automatic recovery of running attempts after process interruption, and no whole-execution overlap lock.
-
-The [orchestrator sandbox check](../sandbox/check-pipeline-orchestrator.ts) simulates a committed count by updating history directly before throwing. It does not prove Raw transaction behavior.
+Completion preserves previously committed counts/checkpoints when omitted from the outcome. Original work exception details are currently replaced with a generic safe summary and execution-ID error. If required history persistence fails, that error surfaces and history may remain `running`.
 
 ## 3. Raw batch transaction
 
-This flow exists in [load_raw_records](../core/system/raw-pipeline-loader.ts), but no current sandbox invokes it with Toast records.
+```mermaid
+flowchart TD
+    A[Source yields bounded batch] --> B[Validate identities and maximum 100 records]
+    B --> C[Begin transaction]
+    C --> D[Lock running history/progress and verify pipeline]
+    D --> E[Insert new or update changed payloads]
+    E --> F[Reject conflicting supplied source context]
+    F --> G[Increment history by committed changes]
+    G --> H[Commit]
+    D -->|Failure| R[Roll back and surface failure]
+    E -->|Failure| R
+    F -->|Failure| R
+    G -->|Failure| R
+```
+
+Remote reads occur outside database transactions. [The loader](../core/system/raw-pipeline-loader.ts) commits Raw changes and counts together; it does not advance source coverage.
+
+| Input | Raw effect | History count |
+| --- | --- | --- |
+| New source identity | Insert revision 1, pending processing | +1 |
+| Changed payload with matching/omitted context | Preserve ID/creation, update payload/revision, clear processed | +1 |
+| Equal payload with matching/omitted context | No update | +0 |
+| Conflicting supplied context, including stored NULL | Reject entire transaction | No committed change |
+| Empty batch | Verify running execution, no Raw insert | +0 |
+| Invalid/duplicate identity, excessive batch, wrong/finished execution | Reject | No committed change |
+
+Omitted context preserves attribution; supplying context does not silently correct old NULL context. Deliberate provenance corrections require their own approval. Raw row locks last only for the batch transaction.
+
+The user reported successful synthetic warehouse checks for changed-payload revisions, unchanged replay, context-conflict rollback and an actual PostgreSQL history-count overflow rolling back a Raw insert. Concurrent context conflicts and source-version ordering are not covered by that evidence.
+
+## 4. Resumable ingestion
+
+**There is one normal ingestion flow, not separate historical and incremental systems.**
 
 ```mermaid
 flowchart TD
-    A[Caller supplies Raw table, execution ID and records] --> B[Validate row limit and source identities]
-    B --> C[Begin database transaction]
-    C --> D[Lock and verify running execution and associated progress]
-    D --> E[Check execution pipeline matches Raw table]
-    E --> F[Insert new rows or update changed JSONB payloads]
-    F --> G[Add changed-row count to execution history]
-    G --> H[Commit both changes together]
-    D -->|Error| R[Roll back transaction and surface failure]
-    E -->|Error| R
-    F -->|Error| R
-    G -->|Error| R
+    A[Configured ingestion starts] --> B[Capture now once]
+    B --> C[Enter per-pipeline guard and record history]
+    C --> D{Saved watermark?}
+    D -->|Yes| E[Start at watermark]
+    D -->|No| F[Start at source data_start_date]
+    E --> G[Generate consecutive windows toward captured now]
+    F --> G
+    G --> H[Extract all source scope for one window]
+    H --> I[Commit bounded Raw batches sequentially]
+    I --> J{Entire window completed?}
+    J -->|No or failure| K[Keep previous checkpoint; replay window next run]
+    J -->|Yes| L[Commit progress and history checkpoint together]
+    L --> G
 ```
 
-Remote reads belong **outside** this transaction. The transaction contains database work only.
+[The shared executer](../core/system/ingestion-executer.ts) defaults to 24-hour elapsed-time windows; pipelines may override `ingestion_window_hours`. The final window ends at captured now. Explicit-date checks/replays use the same extractor/loader/window code without reading or advancing normal progress.
 
-### Inserts, changes and replay
+[Toast's configuration](../core/toast/toast-configuration.ts) starts at January 1, 2026, midnight UTC when no watermark exists. This is the user-selected starting boundary, not proof that older data is unavailable. [Configured Toast ingestion](../core/toast/toast-ingestion.ts) discovers restaurants once and consumes every restaurant's pages in each window. Empty, invalid or duplicate restaurant discovery fails rather than claiming coverage.
 
-| Input | Raw effect | History count effect |
-| --- | --- | --- |
-| New complete source identity | Create row, revision 1, pending processing | +1 |
-| Existing identity with different JSONB | Preserve ID/creation time; replace content; increment revision; reset processed; update execution/time | +1 |
-| Existing identity with equal JSONB | Preserve all Raw fields, including execution/update metadata | +0 |
-| Empty batch | Verify execution, no Raw insert | +0 |
-| Invalid identity, duplicate identity, more than 100 records, missing/finished/wrong-pipeline execution | Reject; no committed Raw changes | No committed increment |
+After the extractor finishes, [window completion](../core/system/pipeline-progress.ts) runs a separate short transaction:
 
-If a database operation fails within the transaction, Raw changes and its count increment roll back together. This is the implementation boundary; an experimental integration check must still prove it.
+1. Lock and verify the running execution and associated pipeline progress.
+2. Require the previous watermark to match expected state.
+3. Advance progress to the window end, update successful-ingestion/update timestamps, and record the same watermark in history.
+4. Commit both updates, or roll back both on failure.
 
-The loader does **not** update `pipeline_progress`, mark a source window complete, compare source modification versions, or coordinate deletions. Per-batch locks are released at transaction end and are not an execution-wide exclusion mechanism.
+The source calls and Raw batches are not held inside this checkpoint transaction. Checkpoint failure cannot make the code skip an unfinished boundary; replay may repeat already committed Raw changes safely when payloads/context are unchanged.
 
-For the next replay check, reuse the same in-memory page. A second live fetch may return genuinely changed data and cannot prove zero-change replay.
+### Failure and restart boundaries
 
-## 4. Boundaries not yet connected
+- A later page/restaurant failure leaves earlier committed batches but does not checkpoint the incomplete window.
+- Earlier fully completed windows remain checkpointed even if the overall run subsequently fails.
+- A crash after the last batch but before checkpointing replays the window. A committed checkpoint allows resuming at the next boundary.
+- Cancellation is checked around windows/batches/loads. In-flight database queries are not immediately cancelled; committed work is not undone. Thrown cancellation currently records `failed`, not `cancelled`.
+- Successful-ingestion time is the time of the last checkpointed window, not proof the complete run or downstream processing succeeded.
+- A changing source is not a snapshot. Late arrivals, source-version correctness and correction/lookback policy remain unresolved.
+- Newly discovered restaurants do not automatically get earlier historical coverage once shared progress has advanced; deliberate historical replay is needed for that scope change.
 
-The future flow is:
+Offline synthetic tests exercise these control-flow boundaries and checkpoint transaction logic. Actual connected checkpoint persistence and process-interruption recovery have not yet been verified. The existing user-run Toast window ingestion used explicit dates and deliberately left progress unchanged.
+
+## 5. Processing and publication: still planned
 
 ```text
-Complete bounded source window -> durable Raw -> revision-safe Processed
-                              -> business-oriented Refined -> published freshness
+durable Raw -> revision-safe Processed -> business-oriented Refined -> published freshness
 ```
 
-It is a target, not implemented behavior:
+No concrete downstream tables/mappers/reports are implemented. Remaining guarantees include:
 
-- Complete windows need bounded pagination and coverage of every participating restaurant.
-- A checkpoint must never advance ahead of durable data. A page-only test leaves it unchanged.
-- Processing must write output and acknowledge the exact Raw revision in one transaction.
-- A newer Raw revision arriving during processing must remain pending, not be acknowledged by stale work.
-- Mapping-version replay must work even when Raw content has not changed.
-- Reports become current only after their required transformations/publication succeed, not when extraction starts or history is marked succeeded.
+- Commit Processed output and acknowledgment of the exact Raw revision together.
+- Keep newer Raw revisions pending when older work finishes.
+- Support mapping-version replay without re-fetching unchanged Raw records.
+- Reconcile money, refunds, voids and split checks to trusted source reports.
+- Publish report freshness only after required transformations complete.
 
-These are tracked in the [development plan](../plan/project-plan.md), rather than presented as existing guarantees.
+No scheduler or supervised worker is connected. See the [development plan](../plan/project-plan.md) rather than treating these as current guarantees.

@@ -60,6 +60,45 @@ try {
   assert.ok(failed_record.finished_at);
   assert.ok(failed_record.error_summary);
 
+  let release_first : (() => void) | undefined;
+  const held_work = new Promise<void>(resolve => {
+    release_first = resolve;
+  });
+  const first_execution = execute_pipeline(
+    pipeline_name,
+    "overlap-check",
+    async () => {
+      await held_work;
+      return {status : "succeeded"};
+    }
+  );
+
+  try {
+    await assert.rejects(
+      execute_pipeline(pipeline_name, "duplicate-start-check", async () => {
+        throw new Error("Duplicate pipeline work must never execute.");
+      }),
+      /already running in this process/
+    );
+
+    await execute_pipeline(
+      "sandbox_independent_pipeline_check",
+      "independent-start-check",
+      async () => ({status : "succeeded"})
+    );
+  } finally {
+    assert.ok(release_first, "Held execution could not be released.");
+    release_first();
+    await first_execution;
+  }
+
+  await execute_pipeline(
+    pipeline_name,
+    "restart-after-completion-check",
+    async () => ({status : "succeeded"})
+  );
+
+  console.log("Duplicate start rejected; independent pipeline and restart succeeded.");
   console.log("Pipeline orchestrator check succeeded.");
 } finally {
   await warehouse_pool.end();

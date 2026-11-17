@@ -43,7 +43,7 @@ try {
     return !previous_record || !isDeepStrictEqual(previous_record.content, record.content);
   }).length;
 
-  const execution_id = await execute_pipeline(
+  const {execution_id} = await execute_pipeline(
     toast_orders_pipeline_name,
     "sandbox-raw-page-replay",
     async current_execution_id => {

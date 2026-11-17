@@ -25,7 +25,7 @@ try {
     toast_orders_pipeline_name
   );
 
-  const execution_id = await execute_ingestion({
+  const {execution_id} = await execute_ingestion({
     raw_table : Raw_Toast_Orders,
     operation : "sandbox-window-ingestion",
     start_at : start_at,

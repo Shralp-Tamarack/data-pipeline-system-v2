@@ -9,8 +9,14 @@ dotenv.config({
   quiet : true
 });
 
+const log_format = process.env.log_format ?? "json";
+if (log_format !== "json" && log_format !== "pretty") {
+  throw new Error("log_format must be json or pretty.");
+}
+
 type Env_Vars = {
   system_environment : string;
+  log_format : "json" | "pretty";
   data_warehouse_connection_string : string;
   toast_api_host : string; 
   toast_client_id : string;
@@ -19,6 +25,7 @@ type Env_Vars = {
 
 const env_vars : Env_Vars = {
   system_environment : process.env.system_environment ?? "",
+  log_format : log_format,
   data_warehouse_connection_string : process.env.data_warehouse_connection_string ?? "",
   toast_api_host : process.env.toast_api_host ?? "",
   toast_client_id : process.env.toast_client_id ?? "",

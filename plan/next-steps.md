@@ -2,75 +2,36 @@
 
 ## Where we stopped
 
-As of the November 13, 2026 documentation refresh:
+As of November 17, 2026, the two Raw Toast pipelines and manual Toast sync are implemented. The user inspected 18 Raw location records and confirmed `processed.locations` exists in the experimental warehouse. The [schema](../core/toast/toast-schema.ts) and [location mapper](../core/toast/toast-locations.ts) are ready; **nothing writes the mapped rows to Processed yet**. See [setup and commands](../documentation/setup-and-commands.md#what-has-been-verified) for the evidence and its limits.
 
-- Shared ingestion, bounded Toast pagination/Raw loading, and a one-process per-pipeline busy guard are implemented.
-- Initial history and ongoing ingestion use one flow and one pipeline watermark.
-- Each source owns its `data_start_date`; Toast starts at January 1, 2026, midnight UTC when no watermark exists.
-- Configured Toast orders ingestion covers all discovered restaurants before checkpointing each window.
-- Type-check and the selected 39 offline tests passed. Prior connected checks were user-run; full evidence is in [setup and commands](../documentation/setup-and-commands.md#what-has-been-verified).
-- Connected completed-window checkpoint/restart behavior and full historical Toast ingestion have **not** been verified.
+## 1. Build the Processed locations writer
 
-Read [architecture](../documentation/architecture.md) and [data flow](../documentation/data-flow.md#4-resumable-ingestion) before continuing. No reset, new schema or migration is required by the latest ingestion changes.
+Start in [toast-locations.ts](../core/toast/toast-locations.ts). Add `process_toast_locations` using the existing pipeline orchestrator with pipeline name `toast_locations` and operation `processing`. Do not add a generic processing framework yet.
 
-## 1. Verify checkpoints and restart against the experimental warehouse
-
-**Next coding task:** add a focused synthetic connected check for configured ingestion. Do not start by running all historical Toast data.
-
-Use a dedicated synthetic pipeline/Raw table or another explicitly reviewed isolated fixture. Do not advance the real `toast_orders` watermark with synthetic records; doing so could skip source data on the next real run. Review any fixture DDL before applying it, and preserve unrelated warehouse state.
-
-The existing [executer check](../sandbox/check-ingestion-executer.ts) verifies explicit-range work and intentionally leaves progress unchanged. It is not the new connected checkpoint check.
+1. In a bounded transaction, select pending Raw locations (`record_source = 'toast_locations'`, `processed = false`) in stable ID order and lock those rows.
+2. Map and upsert on `(source_system, source_record_id)`. Update the name, deletion flag and processing metadata on conflict. Preserve the existing Processed ID, creation time, and `business_type`; new rows can default to `unclassified`.
+3. In the same transaction, acknowledge the exact Raw IDs and revisions written and increment the execution's `records_processed`. If mapping, upsert or acknowledgment fails, roll back the batch; report a safe error without dumping the payload. Earlier committed batches remain durable.
+4. Add a standalone **planned** `npm run process -- toast-locations` command to the [pipeline CLI](../core/system/pipeline-cli.ts), with its existing target guard and shutdown behavior. Do not wire it into Toast sync until the standalone run is verified.
 
 ### Acceptance checks
 
-1. With no watermark, extraction starts at the source's `data_start_date`.
-2. Each completed window saves matching progress/history boundaries after all required pages/scopes finish, including a valid empty-data window.
-3. A second-window or later-restaurant failure retains the first completed checkpoint and already committed Raw batches.
-4. A fresh process resumes at the saved boundary, replays incomplete work without duplicate identities, and does not re-fetch completed windows.
-5. A checkpoint transaction failure cannot leave progress ahead of history or durable data.
-6. Success, failure and cancellation retain accurate committed-change counts and honest status.
-7. Explicit-range checks do not advance normal progress.
-8. Cleanup targets only named synthetic fixtures; preserve real progress/history/source records.
+- Valid Raw locations become queryable by name in `processed.locations`; deleted locations remain available for historical joins.
+- A second run without Raw changes processes zero rows and creates no duplicates.
+- A renamed location keeps its stable Processed ID and reviewed `business_type`.
+- Failed output or acknowledgment leaves the batch pending; an older revision cannot mark a newer revision as processed.
+- The command neither calls Toast nor changes the ingestion watermark. Test offline first, then verify on the approved experimental target. No new migration or orders backfill is required for this step if the expected table already exists.
 
-Before connected execution, the user approves the actual experimental target, fixture scope and mutations. Use synthetic data, verify actual database/credential isolation, and keep one writer. Report any incomplete verification honestly; offline fake persistence is not proof of PostgreSQL transaction behavior.
+## 2. Add reviewed location classifications
 
-## 2. Prepare a controlled real Toast ingestion
+Confirm each outlet's classification with the business or Finance. Maintain a small mapping keyed by Toast location GUID, not name; keep it separate from Raw and provide a deliberate way to apply classification changes without needing a new source revision. Keep `unclassified` locations visible. Use one locations catalog for food and beverage and retail; use item-level sales categories later when the question is what was sold rather than which outlet sold it.
 
-After the connected checkpoint gate:
+## 3. Process orders and reconcile one day
 
-- Reconfirm the desired `data_start_date`, accessible restaurants and any preexisting watermark/context. Do not silently reset them.
-- Confirm historical availability and modification-time behavior. January 1 is the user-selected default, not independently verified source history.
-- Bound the first approved run's work/cancellation budget and source request rate. Loading from January to now can make many requests with the current ten-record pages.
-- Add required bounded transient retries, `Retry-After` handling, token-expiry handling and authentication response bounds before relying on unattended long-running work.
-- Decide source-version and late-change correction behavior from source evidence; do not claim complete freshness from a changing pagination stream alone.
-- Handle changing restaurant scope deliberately: a new accessible restaurant needs older-date replay, not silently inheriting previous all-restaurant coverage.
-- Verify saved coverage, Raw identities/counts, and interruption/resume before authorizing broader history or operational use.
+Join a known day's orders to the catalog without dropping orders with unknown locations. Then build version-aware Processed orders and reconcile sales, refunds, voids, split checks, tax and service-charge treatment, and business dates against a trusted Toast report before relying on financial totals. Mapping-version replay and invalid-record recovery still need a deliberate policy.
 
-Keep the default model simple: **saved watermark or source start -> captured now -> completed-window checkpoints**. No separate historical executer or default backfill state.
+## 4. Deferred ingestion and operational work
 
-## 3. Build useful Processed records
-
-Agree on trusted source comparisons, original-order/split-check relationships, business dates/timezones, exact monetary values, discounts, refunds, voids, taxes and service charges.
-
-- Define the first concrete Processed table using the existing metadata builder and explicit business identities/indexes.
-- Implement bounded pending-record selection and a specific mapper.
-- Commit output and acknowledgment of the exact Raw revision together.
-- Prove newer revisions stay pending and mapping-version replay works.
-- Record recoverable failures with safe diagnostic context.
-
-**Gate:** a completed day's results reconcile to a trusted Toast report. Payment totals are not automatically net sales.
-
-## 4. Scheduling, second-source proof and operational readiness
-
-- Add the chosen `node-cron` dependency only when implementing the scheduler; use an explicit registry and one supervised worker.
-- Reuse the same ingestion functions for scheduled and manual invocation.
-- Add bounded shutdown, catch-up, abandoned-history recovery, structured safe diagnostics and practical freshness alerts.
-- Preserve the one-process guard: no standalone ingestion while the worker runs; stop the old worker before its replacement starts. Revisit database-wide coordination only if multiple processes become a requirement.
-- Prove reuse with a second integration and later a real file/database case before generalizing.
-- Build business-oriented Refined models, reporting queries and published freshness after Processed correctness.
-
-See the [project plan](project-plan.md#10-delivery-sequence-and-acceptance-gates) for broader gates. Operational schedules, migrations, corrections, resets and historical runs require specific target/scope approval and recovery preparation.
-
-## Working agreement
-
-The assistant implements requested code changes and explains what changed and why for user review. Source access and consequential database/operational actions need separate authorization. Refresh documentation/plans in an explicitly requested batch, not as a routine per-step chore.
+- Verify connected checkpoint and fresh-process restart behavior with the isolated [synthetic restart check](../sandbox/check-ingestion-restart.ts), without advancing real Toast progress. Connected ingestion samples are not proof of full historical coverage. New locations may need a deliberate older-range replay.
+- Keep current Toast pacing. If ongoing sync remains slow after catch-up, measure limiter, request/retry and database-write time before optimizing. Confirm Toast's historical spacing rules before introducing cross-location concurrency.
+- Add `node-cron` and a supervised Render worker after standalone behavior is verified. Reuse the source workflow, prevent overlapping writers, and validate shutdown, recovery, and freshness. Do not run independent processes against the same pipeline under the current process-local guard.
+- Prove reuse with a second source before generalizing the framework. See the [project plan](project-plan.md) for broader acceptance gates.

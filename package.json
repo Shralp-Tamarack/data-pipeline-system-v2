@@ -6,11 +6,13 @@
   "scripts": {
     "build": "tsc",
     "type-check": "tsc --noEmit",
-    "sandbox" : "cd sandbox && node",
-    "gen-drizzle-ddl" : "drizzle-kit generate",
-    "exe-drizzle-ddl" : "drizzle-kit migrate",
-    "gen-exe-drizzle-ddl" : "npm run gen-drizzle-ddl && npm run exe-drizzle-ddl",
-    "reset-db" : "node scripts/reset-database.ts"
+    "sandbox": "cd sandbox && node",
+    "gen-drizzle-ddl": "drizzle-kit generate",
+    "exe-drizzle-ddl": "drizzle-kit migrate",
+    "gen-exe-drizzle-ddl": "npm run gen-drizzle-ddl && npm run exe-drizzle-ddl",
+    "reset-db": "node scripts/reset-database.ts",
+    "ingest": "node core/system/pipeline-cli.ts ingest",
+    "sync": "node core/system/pipeline-cli.ts sync"
   },
   "keywords": [],
   "author": "",
@@ -26,6 +28,8 @@
     "dotenv": "^18.0.10",
     "drizzle-orm": "^0.45.4",
     "pg": "^8.23.1",
+    "pino": "^10.4.0",
+    "pino-pretty": "^13.2.0",
     "zod": "^4.6.7"
   }
 }

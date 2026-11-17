@@ -6,7 +6,7 @@ See [architecture](architecture.md) for module/schema ownership, [setup and comm
 
 The business-date pilot reader reads one page without warehouse access. The modification-time extractor follows all validated pages for a requested restaurant/window, yielding bounded nonempty batches. [The read-only window check](../sandbox/check-toast-order-window.ts) uses an explicit one-day range and a two-minute overall deadline; this deadline is a check budget, not a default historical-ingestion duration.
 
-Toast requests use 20-second timeouts plus caller cancellation. Order responses are capped at 4 MiB; discovery at 1 MiB. The streamed [response reader](../core/toast/toast-response.ts) handles split UTF-8, cancels oversized bodies and redacts JSON parse errors. Authentication does not yet use that byte cap.
+Toast requests use 20-second timeouts plus caller cancellation. Responses are capped at 4 MiB for orders, 1 MiB for discovery, and 64 KiB for authentication. The streamed [response reader](../core/toast/toast-response.ts) handles split UTF-8 and cancels oversized bodies. The [request helper](../core/toast/toast-request.ts) spaces orders requests five seconds apart across locations in one process and logs bounded retries without exposing request data. The [authentication helper](../core/toast/toast-authentication.ts) reuses the access token.
 
 Safe page/count diagnostics do not log tokens or order payloads. Reading one restaurant/window proves neither all-restaurant coverage nor report freshness.
 
@@ -30,7 +30,7 @@ flowchart TD
 
 One worker/process is the operating assumption. Do not run standalone ingestion while that worker is active; stop the old process before replacement. The guard is not cross-process locking and does not recover abandoned history.
 
-Completion preserves previously committed counts/checkpoints when omitted from the outcome. Original work exception details are currently replaced with a generic safe summary and execution-ID error. If required history persistence fails, that error surfaces and history may remain `running`.
+Completion preserves previously committed counts/checkpoints when omitted from the outcome. The runner returns the execution ID and persisted status, or throws on a failure; logs for a run carry its `execution_id`. History stores a safe summary of thrown work errors, while the exception retains the original cause without automatically logging it. If required history persistence fails, that error surfaces and history may remain `running`.
 
 ## 3. Raw batch transaction
 
@@ -73,7 +73,7 @@ flowchart TD
     A[Configured ingestion starts] --> B[Capture now once]
     B --> C[Enter per-pipeline guard and record history]
     C --> D{Saved watermark?}
-    D -->|Yes| E[Start at watermark]
+    D -->|Yes| E[Start at watermark minus lookback]
     D -->|No| F[Start at source data_start_date]
     E --> G[Generate consecutive windows toward captured now]
     F --> G
@@ -81,13 +81,14 @@ flowchart TD
     H --> I[Commit bounded Raw batches sequentially]
     I --> J{Entire window completed?}
     J -->|No or failure| K[Keep previous checkpoint; replay window next run]
-    J -->|Yes| L[Commit progress and history checkpoint together]
+    J -->|Yes and window ends beyond watermark| L[Commit progress and history checkpoint together]
+    J -->|Yes but replay only| G
     L --> G
 ```
 
-[The shared executer](../core/system/ingestion-executer.ts) defaults to 24-hour elapsed-time windows; pipelines may override `ingestion_window_hours`. The final window ends at captured now. Explicit-date checks/replays use the same extractor/loader/window code without reading or advancing normal progress.
+[The shared executer](../core/system/ingestion-executer.ts) defaults to seven elapsed days per window and a one-day lookback for configured runs with a saved watermark. Toast orders overrides the window size to 28 days, not the lookback. The last window ends at captured now and can be shorter. Explicit-date checks/replays reuse extraction and loading without using or advancing the normal watermark.
 
-[Toast's configuration](../core/toast/toast-configuration.ts) starts at January 1, 2026, midnight UTC when no watermark exists. This is the user-selected starting boundary, not proof that older data is unavailable. [Configured Toast ingestion](../core/toast/toast-ingestion.ts) discovers restaurants once and consumes every restaurant's pages in each window. Empty, invalid or duplicate restaurant discovery fails rather than claiming coverage.
+[Toast orders](../core/toast/toast-orders.ts) starts at June 1, 2026, midnight UTC when no watermark exists. This is a chosen boundary, not proof of available history. It discovers locations once per run when extraction is needed, then consumes each location's pages (up to 100 orders per page) in every window. Invalid, empty or duplicate location discovery fails rather than claiming coverage. Order windows use source modification time, not the date the order was placed.
 
 After the extractor finishes, [window completion](../core/system/pipeline-progress.ts) runs a separate short transaction:
 
@@ -102,21 +103,25 @@ The source calls and Raw batches are not held inside this checkpoint transaction
 
 - A later page/restaurant failure leaves earlier committed batches but does not checkpoint the incomplete window.
 - Earlier fully completed windows remain checkpointed even if the overall run subsequently fails.
-- A crash after the last batch but before checkpointing replays the window. A committed checkpoint allows resuming at the next boundary.
+- A crash after the last batch but before checkpointing leaves that window unacknowledged. The next configured run starts at the last durable boundary minus the lookback, so it may replay some already committed work.
 - Cancellation is checked around windows/batches/loads. In-flight database queries are not immediately cancelled; committed work is not undone. Thrown cancellation currently records `failed`, not `cancelled`.
 - Successful-ingestion time is the time of the last checkpointed window, not proof the complete run or downstream processing succeeded.
-- A changing source is not a snapshot. Late arrivals, source-version correctness and correction/lookback policy remain unresolved.
+- A changing source is not a snapshot. The current overlap mitigates some late arrivals; it does not guarantee coverage of late or older corrections or prevent all out-of-order versions.
 - Newly discovered restaurants do not automatically get earlier historical coverage once shared progress has advanced; deliberate historical replay is needed for that scope change.
 
-Offline synthetic tests exercise these control-flow boundaries and checkpoint transaction logic. Actual connected checkpoint persistence and process-interruption recovery have not yet been verified. The existing user-run Toast window ingestion used explicit dates and deliberately left progress unchanged.
+Offline synthetic tests exercise these boundaries and checkpoint transaction logic. User-run configured loads reported successful Raw changes, but a controlled connected interruption/fresh-process restart and full coverage audit remain unverified. An isolated [synthetic restart check](../sandbox/check-ingestion-restart.ts) exists for the former.
 
-## 5. Processing and publication: still planned
+## 5. Location snapshots and manual sync
+
+[Raw locations](../core/toast/toast-locations.ts) refreshes the current accessible catalog in batches of at most 100. It does not advance a time watermark or infer deletion from a missing location. A new-GUID warning reports discovery, not successful persistence or an orders backfill. [Manual Toast sync](../core/toast/toast-sync.ts) completes and checks the location outcome before starting Raw orders; independently, orders still discovers locations directly from Toast.
+
+## 6. Processing and publication boundary
 
 ```text
 durable Raw -> revision-safe Processed -> business-oriented Refined -> published freshness
 ```
 
-No concrete downstream tables/mappers/reports are implemented. Remaining guarantees include:
+`processed.locations` and its mapper exist. The mapper derives a trimmed display name, retains lineage and deletion state, and leaves business classification alone. No command currently invokes it to write Processed rows. Remaining guarantees include:
 
 - Commit Processed output and acknowledgment of the exact Raw revision together.
 - Keep newer Raw revisions pending when older work finishes.

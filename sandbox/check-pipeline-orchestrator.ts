@@ -12,7 +12,7 @@ if (env_vars.system_environment !== "experimental") {
 const pipeline_name = "sandbox_orchestrator_check";
 
 try {
-  const successful_execution_id = await execute_pipeline(
+  const {execution_id : successful_execution_id} = await execute_pipeline(
     pipeline_name,
     "success-check",
     async () => ({status : "succeeded"})

@@ -1,10 +1,16 @@
 import {z} from "zod";
+import type {Logger} from "pino";
 import {env_vars} from "../system/system-configuration.ts";
-import {request_toast_access_token} from "./toast-authentication.ts";
-import {read_toast_json_response} from "./toast-response.ts";
+import {request_toast_authorized_json} from "./toast-authentication.ts";
+import {Toast_Request_Error} from "./toast-request.ts";
+import {toast_configuration} from "./toast-configuration.ts";
 import type {Ingestion_Window} from "../system/ingestion-windows.ts";
 import {get_toast_next_page_number} from "./toast-order-pagination.ts";
 import type { Raw_Record_Input } from "../system/ingestion-types.ts";
+import {execute_ingestion} from "../system/ingestion-executer.ts";
+import type {Pipeline_Execution_Result} from "../system/pipeline-types.ts";
+import {get_toast_locations} from "./toast-locations.ts";
+import {Raw_Toast_Orders} from "./toast-schema.ts";
 
 const toast_order_schema = z.object({
   guid : z.string().refine(order_guid => order_guid.trim().length > 0)
@@ -30,8 +36,6 @@ export async function get_toast_order_page(
     throw new Error("Toast business date must use YYYYMMDD.");
   }
 
-  const access_token = await request_toast_access_token();
-
   const request_url = new URL(
     "/orders/v2/ordersBulk",
     env_vars.toast_api_host
@@ -41,28 +45,22 @@ export async function get_toast_order_page(
   request_url.searchParams.set("page", "1");
   request_url.searchParams.set("pageSize", "10");
 
-  const response = await fetch(request_url, {
+  const response = await request_toast_authorized_json(request_url, {
     method : "GET",
-    redirect : "error",
-    signal : AbortSignal.timeout(20_000),
+    operation : "orders",
+    max_response_bytes : 4_194_304,
     headers : {
-      Authorization : `Bearer ${access_token}`,
       "Toast-Restaurant-External-ID" : restaurant_guid,
       Accept : "application/json"
     }
   });
 
-  if (!response.ok) {
-    throw new Error(`Toast order request failed: HTTP ${response.status}.`);
-  }
-
-  const order_data = await read_toast_json_response(response, 4_194_304);
   const validation_result = z.array(toast_order_schema)
     .max(10)
-    .safeParse(order_data);
+    .safeParse(response.data);
 
   if (!validation_result.success) {
-    throw new Error("Toast returned an invalid order page.");
+    throw new Toast_Request_Error("orders", "Toast returned an invalid order page.");
   }
 
   return {
@@ -75,7 +73,8 @@ export async function get_toast_order_page(
 export async function* extract_toast_order_window(
   restaurant_guid : string,
   window : Ingestion_Window,
-  signal : AbortSignal
+  signal : AbortSignal,
+  logger? : Logger
 ): AsyncGenerator<Toast_Order_Record[], void, unknown> {
   if (!z.uuid().safeParse(restaurant_guid).success) {
     throw new Error("A valid Toast restaurant GUID is required.");
@@ -98,11 +97,9 @@ export async function* extract_toast_order_window(
 
   const start_date = window.start_at.toISOString();
   const end_date = window.end_at.toISOString();
+  const page_size = toast_configuration.request_page_size;
 
   signal.throwIfAborted();
-  const access_token = await request_toast_access_token(signal);
-  signal.throwIfAborted();
-
   let page_number : number | null = 1;
 
   while (page_number !== null) {
@@ -116,37 +113,26 @@ export async function* extract_toast_order_window(
     request_url.searchParams.set("startDate", start_date);
     request_url.searchParams.set("endDate", end_date);
     request_url.searchParams.set("page", String(page_number));
-    request_url.searchParams.set("pageSize", "10");
+    request_url.searchParams.set("pageSize", String(page_size));
 
-    const response = await fetch(request_url, {
+    const response = await request_toast_authorized_json(request_url, {
       method : "GET",
-      redirect : "error",
-      signal : AbortSignal.any([
-        signal,
-        AbortSignal.timeout(20_000)
-      ]),
+      operation : "orders",
+      signal : signal,
+      logger : logger,
+      max_response_bytes : 4_194_304,
       headers : {
-        Authorization : `Bearer ${access_token}`,
         "Toast-Restaurant-External-ID" : restaurant_guid,
         Accept : "application/json"
       }
     });
 
-    if (!response.ok) {
-      throw new Error(`Toast order request failed: HTTP ${response.status}.`);
-    }
-
-    const order_data = await read_toast_json_response(
-      response,
-      4_194_304
-    );
-
     const validation_result = z.array(toast_order_schema)
-      .max(10)
-      .safeParse(order_data);
+      .max(page_size)
+      .safeParse(response.data);
 
     if (!validation_result.success) {
-      throw new Error("Toast returned an invalid order page.");
+      throw new Toast_Request_Error("orders", "Toast returned an invalid order page.");
     }
 
     const order_records = validation_result.data;
@@ -181,12 +167,14 @@ export async function* extract_toast_order_window(
 export async function* extract_toast_raw_order_window(
   restaurant_guid : string,
   window : Ingestion_Window,
-  signal : AbortSignal
+  signal : AbortSignal,
+  logger? : Logger
 ): AsyncGenerator<Raw_Record_Input[], void, unknown> {
   for await (const orders of extract_toast_order_window(
     restaurant_guid,
     window,
-    signal
+    signal,
+    logger
   )) {
     yield orders.map(order => ({
       source_record_id : order.guid,
@@ -194,4 +182,50 @@ export async function* extract_toast_raw_order_window(
       content : order
     }));
   }
+}
+
+/** Ingests orders for all discovered locations, resuming the shared pipeline watermark. */
+export async function ingest_toast_orders(signal : AbortSignal): Promise<Pipeline_Execution_Result> {
+  let location_guids : string[] | undefined;
+
+  return execute_ingestion({
+    raw_table : Raw_Toast_Orders,
+    operation : "ingestion",
+    source_configuration : toast_configuration,
+    ingestion_window_days : toast_configuration.window_size_in_days,
+    ingestion_lookback_days : toast_configuration.orders_ingestion_lookback_days,
+    signal : signal,
+    extract_window : async function* (window, extraction_signal, pipeline_logger) {
+      if (!location_guids) {
+        const locations = await get_toast_locations(extraction_signal, pipeline_logger);
+        location_guids = locations.map(location => location.restaurantGuid);
+        if (
+          location_guids.length === 0 ||
+          location_guids.some(guid => !z.uuid().safeParse(guid).success) ||
+          new Set(location_guids).size !== location_guids.length
+        ) {
+          throw new Error("Toast discovery must return a nonempty list of unique valid location GUIDs.");
+        }
+        pipeline_logger.info({
+          event : "source_locations_selected",
+          source_system : "toast",
+          location_count : location_guids.length
+        }, "Selected Toast locations for orders ingestion");
+      }
+
+      for (const [index, location_guid] of location_guids.entries()) {
+        extraction_signal.throwIfAborted();
+        yield* extract_toast_raw_order_window(location_guid, window, extraction_signal, pipeline_logger);
+        pipeline_logger.info({
+          event : "source_location_window_completed",
+          source_system : "toast",
+          location_guid : location_guid,
+          location_number : index + 1,
+          location_count : location_guids.length,
+          window_start_at : window.start_at,
+          window_end_at : window.end_at
+        }, "Completed Toast orders window for location");
+      }
+    }
+  });
 }

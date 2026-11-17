@@ -44,7 +44,7 @@ try {
       operation : operation,
       start_at : start_at,
       end_at : end_at,
-      ingestion_window_hours : 1,
+      ingestion_window_days : 1 / 24,
       signal : controller.signal,
       extract_window : async function* (window) {
         visited_windows.push({

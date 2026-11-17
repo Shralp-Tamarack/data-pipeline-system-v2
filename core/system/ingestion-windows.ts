@@ -3,11 +3,13 @@ export type Ingestion_Window = {
   end_at : Date;
 };
 
-/** Yields consecutive source-time windows; does not fetch data or advance progress. */
+export const default_ingestion_window_days = 7;
+
+/** Yields consecutive windows of seven elapsed days by default; the final window can be shorter. */
 export function* create_ingestion_windows(
   start_at : Date,
   end_at : Date,
-  ingestion_window_hours : number = 24
+  ingestion_window_days : number = default_ingestion_window_days
 ): Generator<Ingestion_Window, void, unknown> {
   const start_timestamp = start_at.getTime();
   const end_timestamp = end_at.getTime();
@@ -23,16 +25,16 @@ export function* create_ingestion_windows(
     throw new Error("Ingestion range end must not precede its start.");
   }
 
-  const window_milliseconds = ingestion_window_hours * 3_600_000;
+  const window_milliseconds = Math.round(ingestion_window_days * 86_400_000);
 
   if (
-    !Number.isFinite(ingestion_window_hours) ||
-    ingestion_window_hours <= 0 ||
+    !Number.isFinite(ingestion_window_days) ||
+    ingestion_window_days <= 0 ||
     !Number.isSafeInteger(window_milliseconds) ||
     window_milliseconds < 1
   ) {
     throw new Error(
-      "ingestion_window_hours must produce a positive whole-millisecond duration."
+      "ingestion_window_days must be positive and round to at least one millisecond."
     );
   }
 

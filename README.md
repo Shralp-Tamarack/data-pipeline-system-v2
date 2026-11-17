@@ -4,11 +4,11 @@ A Node.js and TypeScript system for bringing Tamarack's source data into a Neon 
 
 ## Current usable scope
 
-Toast orders can be extracted in bounded modification-time windows and loaded into Raw with replay-safe identities and transactional committed-change counts. Configured ingestion uses **one flow for initial history and ongoing updates**: start at the saved pipeline watermark, otherwise the source's `data_start_date`, and work toward the time captured at run start.
+Toast locations can be refreshed as a Raw snapshot, and Toast orders can be loaded into Raw in bounded modification-time windows. The manual `npm run sync -- toast` command refreshes locations first, then ingests orders. Each pipeline can also be run on its own. These commands contact Toast and write to the experimental warehouse; see [command effects](documentation/setup-and-commands.md#commands-and-their-effects) before running them.
 
-Toast's configured start is **January 1, 2026, midnight UTC**. Its configured ingestion covers all discovered restaurants before checkpointing each window. Checkpoint/resume behavior has passed offline synthetic tests; connected checkpoint persistence and the full historical load have **not** been verified.
+Toast orders use **one flow for initial history and ongoing updates**: start at June 1, 2026, midnight UTC if no watermark exists, otherwise reread from one day before the saved watermark. Toast uses windows of up to 28 days; the shared fallback for other callers is seven days. The watermark advances only after all locations in a window finish.
 
-There are no concrete Processed business tables, Refined models, reports, scheduled worker or application start command yet. `node-cron` is the chosen scheduler, not an installed or implemented capability. Same-pipeline overlap protection works within one Node process only.
+The first Processed table, `processed.locations`, and its Toast mapper are defined. The user confirmed the table exists in the experimental warehouse, but there is no writer or processing command yet. There are no Refined reports or scheduled worker. The existing per-pipeline overlap guard works within one Node process only.
 
 ## Safe getting started
 
@@ -39,4 +39,4 @@ There are no concrete Processed business tables, Refined models, reports, schedu
 - [Next steps](plan/next-steps.md): where to resume and the next acceptance checks.
 - [Project plan](plan/project-plan.md): future delivery, business requirements and open decisions.
 
-**Next session:** verify completed-window persistence and restart/replay against an explicitly approved experimental warehouse, using synthetic records before any full historical Toast run. No reset or migration is required by the latest ingestion changes.
+**Next session:** build the [Processed locations writer](plan/next-steps.md#1-build-the-processed-locations-writer), then run it on its own and check that a rerun is a no-op. No new Toast calls, orders backfill, or additional migration is needed for that step on the verified experimental target.

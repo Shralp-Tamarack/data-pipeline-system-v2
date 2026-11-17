@@ -140,7 +140,7 @@ export function create_raw_table(pipeline_name : string) {
 
 export const Processed_Schema = pgSchema("processed");
 
-/** Creates fresh identity and metadata columns for a Processed table. */
+/** Creates identity and metadata columns for a Processed table backed by one Raw table. */
 export function create_processed_columns(
   raw_table : ReturnType<typeof create_raw_table>
 ) {
@@ -150,7 +150,10 @@ export function create_processed_columns(
 
       raw_record_id : uuid("raw_record_id")
         .notNull()
-        .references(() => raw_table.id, {onDelete : "restrict"})
+        .references(() => raw_table.id, {onDelete : "restrict"}),
+
+      source_system : text("source_system").notNull(),
+      source_record_id : text("source_record_id").notNull()
     },
 
     metadata_columns : {

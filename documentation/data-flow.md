@@ -30,7 +30,7 @@ flowchart TD
 
 One worker/process is the operating assumption. Do not run standalone ingestion while that worker is active; stop the old process before replacement. The guard is not cross-process locking and does not recover abandoned history.
 
-Completion preserves previously committed counts/checkpoints when omitted from the outcome. The runner returns the execution ID and persisted status, or throws on a failure; logs for a run carry its `execution_id`. History stores a safe summary of thrown work errors, while the exception retains the original cause without automatically logging it. If required history persistence fails, that error surfaces and history may remain `running`.
+Completion preserves previously committed counts/checkpoints when omitted from the outcome. The orchestrator returns the execution ID and persisted status, or throws on a failure; logs for an execution carry its `execution_id`. History stores a safe summary of thrown work errors, while the exception retains the original cause without automatically logging it. If required history persistence fails, that error surfaces and history may remain `running`.
 
 ## 3. Raw batch transaction
 
@@ -115,16 +115,61 @@ Offline synthetic tests exercise these boundaries and checkpoint transaction log
 
 [Raw locations](../core/toast/toast-locations.ts) refreshes the current accessible catalog in batches of at most 100. It does not advance a time watermark or infer deletion from a missing location. A new-GUID warning reports discovery, not successful persistence or an orders backfill. [Manual Toast sync](../core/toast/toast-sync.ts) completes and checks the location outcome before starting Raw orders; independently, orders still discovers locations directly from Toast.
 
-## 6. Processing and publication boundary
+## 6. Processed locations and type mapping
+
+```mermaid
+flowchart TD
+    A[Start tracked processing execution] --> B[Lock history/progress and select up to 100 pending Raw rows]
+    B --> C{Any pending rows?}
+    C -->|Yes| D[Map and upsert Processed locations]
+    D --> E[Mark exact Raw IDs and revisions processed and increment history count]
+    E --> F[Commit batch]
+    F --> B
+    C -->|No| G[Apply reviewed location types in separate transaction]
+    G --> H[Log locations_updated]
+    H --> I[Persist processing success]
+    D -->|Failure| R[Roll back batch and fail execution]
+    E -->|Failure| R
+    G -->|Failure| S[Roll back type updates and fail execution; earlier batches remain]
+```
+
+`npm run process -- toast-locations` invokes [the shared executer](../core/system/processing-executer.ts), not Toast extraction. It drains all pending rows, checks cancellation between batches, and rejects invalid callback counts. Each [location batch](../core/toast/toast-locations.ts) locks history/progress before Raw; output, exact revision markers and the count commit together. The mapper validates names and deletion flags and preserves lineage. Mapping failures fail the batch rather than silently dropping a record.
+
+The upsert does not overwrite `type`. Finalization applies the reviewed [GUID-to-type map](../core/toast/toast-location-type-map.ts), even when the first batch returns zero. It locks each mapped Processed row, skips unchanged types, and updates only `type`/`updated_at`. A missing mapped row or failed update rolls back the complete type-application transaction. New unmapped locations retain the default `unclassified`; existing unmapped types are preserved.
+
+`processing_batch_completed` records positive Raw batch counts. `location_types_applied` records changed classifications separately as `locations_updated`. Both use the processing execution's logger. A rerun without Raw or mapping changes has zero Raw work and zero classification changes. A mapping edit can change classifications without modifying Raw or the ingestion watermark.
+
+Finalization is inside the tracked execution and process-local guard, not a follow-up after success. It must finish before success is recorded. Cancellation cannot undo committed batches or an already committed type transaction; thrown cancellation currently records failure. No helper updates `last_successful_processing_at` yet.
+
+## 7. Deletion handling: implemented helper, unfinished ingestion wiring
+
+The intended end-to-end path is:
+
+```text
+source confirms deletion -> Raw.deleted = true and pending -> Processed.deleted = true
+```
+
+Only the following pieces are currently implemented:
+
+- `mark_raw_records_deleted` in [the Raw loader](../core/system/raw-pipeline-loader.ts) marks confirmed, existing active Raw IDs deleted in batches of at most 100. It requires the correct running execution, preserves payload/identity, increments revisions and sets `processed = false`. Raw changes and history `records_loaded` increment commit together; repeat/unknown IDs contribute zero changes.
+- The location mapper carries `raw.deleted OR content.deleted` into Processed, with output and exact Raw acknowledgment in the same transaction.
+- `Raw_Record_Input` declares optional `deleted` metadata, but ordinary loading ignores it.
+
+There is **no automatic caller of the deletion helper**, no source-missing comparison, no normal-ingestion restoration, and no Processed orders implementation. Deletion-only input metadata currently does not trigger an upsert. If Raw is marked deleted now, an ordinary later upsert does not clear that flag.
+
+Source deletion is different from a void or refund. An ID missing from incremental/date-filtered results is not proof of deletion. Automatic missing-record deletion must wait for a complete, authoritative inventory of the same scope and a successfully finished scan. Unchanged rows do not receive a new execution ID on ordinary replay, so the existing Raw `execution_id` cannot serve as a last-seen marker.
+
+Analytics must deliberately exclude deleted data; there is no current report/view enforcing that filter. Propagation to Processed requires successful processing and is not immediately guaranteed when processing is failing. [Next steps](../plan/next-steps.md) describes the small remaining implementation stages.
+
+## 8. Publication boundary
 
 ```text
 durable Raw -> revision-safe Processed -> business-oriented Refined -> published freshness
 ```
 
-`processed.locations` and its mapper exist. The mapper derives a trimmed display name, retains lineage and deletion state, and leaves business classification alone. No command currently invokes it to write Processed rows. Remaining guarantees include:
+Locations processing is implemented and user-reported on the experimental database. Remaining work includes:
 
-- Commit Processed output and acknowledgment of the exact Raw revision together.
-- Keep newer Raw revisions pending when older work finishes.
+- Verify actual PostgreSQL lock/revision concurrency and rollback boundaries beyond the synthetic tests and simple user-reported executions.
 - Support mapping-version replay without re-fetching unchanged Raw records.
 - Reconcile money, refunds, voids and split checks to trusted source reports.
 - Publish report freshness only after required transformations complete.

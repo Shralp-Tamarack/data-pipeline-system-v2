@@ -1,6 +1,6 @@
 import {z} from "zod";
 import type {Logger} from "pino";
-import {and, eq, inArray} from "drizzle-orm";
+import {and, eq, inArray, or, sql} from "drizzle-orm";
 import {env_vars} from "../system/system-configuration.ts";
 import {warehouse_db} from "../system/pgsql-warehouse.ts";
 import {request_toast_authorized_json} from "./toast-authentication.ts";
@@ -11,8 +11,12 @@ import {load_raw_records} from "../system/raw-pipeline-loader.ts";
 import {
   Raw_Toast_Locations,
   toast_locations_pipeline_name,
-  toast_source_system_name
+  toast_source_system_name,
+  Processed_Locations
 } from "./toast-schema.ts";
+import {Pipeline_Execution_History, Pipeline_Progress} from "../system/system-schema.ts";
+import { execute_processing } from "../system/processing-executer.ts";
+import {toast_location_type_map} from "./toast-location-type-map.ts";
 
 const toast_location_schema = z.object({
   restaurantGuid : z.string().refine(
@@ -155,4 +159,172 @@ export function map_toast_location(
     deleted : raw_location.deleted || content.deleted,
     raw_content_revision : raw_location.content_revision
   };
+}
+
+const location_processing_version = 1;
+
+// Commit output, Raw revision markers and the count together; Raw locks prevent newer revisions being marked done.
+async function process_toast_location_batch(execution_id : string) : Promise<number> {
+  return warehouse_db.transaction(async transaction => {
+    // Match ingestion's history/progress-before-Raw lock order.
+    const [execution_record] = await transaction
+      .select({pipeline_name : Pipeline_Progress.pipeline_name})
+      .from(Pipeline_Execution_History)
+      .innerJoin(
+        Pipeline_Progress,
+        eq(Pipeline_Execution_History.pipeline_progress_id, Pipeline_Progress.id)
+      )
+      .where(and(
+        eq(Pipeline_Execution_History.id, execution_id),
+        eq(Pipeline_Execution_History.operation, "processing"),
+        eq(Pipeline_Execution_History.status, "running")
+      ))
+      .for("update");
+
+    if (!execution_record || execution_record.pipeline_name !== toast_locations_pipeline_name) {
+      throw new Error("Location processing requires a running processing execution for this pipeline.");
+    }
+
+    const raw_locations = await transaction
+      .select()
+      .from(Raw_Toast_Locations)
+      .where(and(
+        eq(Raw_Toast_Locations.record_source, toast_locations_pipeline_name),
+        eq(Raw_Toast_Locations.processed, false)
+      ))
+      .orderBy(Raw_Toast_Locations.id)
+      .limit(100)
+      .for("update");
+
+    if (raw_locations.length === 0) {
+      return 0;
+    }
+
+    const processed_locations = raw_locations.map(raw_location => ({
+      ...map_toast_location(raw_location),
+      processing_version : location_processing_version,
+      execution_id : execution_id
+    }));
+
+    await transaction
+      .insert(Processed_Locations)
+      .values(processed_locations)
+      .onConflictDoUpdate({
+        target : [Processed_Locations.source_system, Processed_Locations.source_record_id],
+        set : {
+          name : sql`excluded.name`,
+          deleted : sql`excluded.deleted`,
+          raw_content_revision : sql`excluded.raw_content_revision`,
+          processing_version : sql`excluded.processing_version`,
+          execution_id : sql`excluded.execution_id`,
+          updated_at : sql`now()`
+        }
+      });
+
+    const processed_batch_records = await transaction
+      .update(Raw_Toast_Locations)
+      .set({processed : true})
+      .where(or(...raw_locations.map(raw_location => and(
+        eq(Raw_Toast_Locations.id, raw_location.id),
+        eq(Raw_Toast_Locations.content_revision, raw_location.content_revision)
+      ))))
+      .returning({id : Raw_Toast_Locations.id});
+
+    if (processed_batch_records.length !== raw_locations.length) {
+      throw new Error("Not every Raw location in the batch was marked as processed.");
+    }
+
+    const [execution] = await transaction
+      .update(Pipeline_Execution_History)
+      .set({
+        records_processed : sql`${Pipeline_Execution_History.records_processed} + ${processed_batch_records.length}`
+      })
+      .where(and(
+        eq(Pipeline_Execution_History.id, execution_id),
+        eq(Pipeline_Execution_History.operation, "processing"),
+        eq(Pipeline_Execution_History.status, "running")
+      ))
+      .returning({id : Pipeline_Execution_History.id});
+
+    if (!execution) {
+      throw new Error("Location processing requires a running processing execution.");
+    }
+
+    return processed_batch_records.length;
+  });
+}
+
+export async function process_toast_locations(
+  signal : AbortSignal
+) : Promise<Pipeline_Execution_Result> {
+  return execute_processing({
+    pipeline_name : toast_locations_pipeline_name,
+    signal : signal,
+    process_batch : process_toast_location_batch,
+    finalize_processing : async pipeline_logger => {
+      signal.throwIfAborted();
+
+      const locations_updated = await apply_toast_location_types();
+
+      pipeline_logger.info({
+        event : "location_types_applied",
+        locations_updated : locations_updated
+      }, "Toast location types applied");
+    }
+  });
+}
+
+export async function apply_toast_location_types(): Promise<number> {
+  if (env_vars.system_environment !== "experimental") {
+    throw new Error("Applying location business types currently requires the experimental environment.");
+  }
+
+  const mapped_location_types = [...toast_location_type_map];
+
+  if (mapped_location_types.length === 0) {
+    throw new Error("No Toast location business types are configured.");
+  }
+
+  return warehouse_db.transaction(async transaction => {
+    let locations_updated = 0;
+
+    for (const [source_record_id, type] of mapped_location_types) {
+      const [location] = await transaction
+        .select({
+          id : Processed_Locations.id,
+          type : Processed_Locations.type
+        })
+        .from(Processed_Locations)
+        .where(and(
+          eq(Processed_Locations.source_system, toast_source_system_name),
+          eq(Processed_Locations.source_record_id, source_record_id)
+        ))
+        .for("update");
+
+      if (!location) {
+        throw new Error("A mapped Toast location does not exist in Processed.");
+      }
+
+      if (location.type === type) {
+        continue;
+      }
+
+      const updated_locations = await transaction
+        .update(Processed_Locations)
+        .set({
+          type : type,
+          updated_at : sql`now()`
+        })
+        .where(eq(Processed_Locations.id, location.id))
+        .returning({id : Processed_Locations.id});
+
+      if (updated_locations.length !== 1) {
+        throw new Error("The Toast location type update did not affect exactly one location.");
+      }
+
+      locations_updated += 1;
+    }
+
+    return locations_updated;
+  });
 }

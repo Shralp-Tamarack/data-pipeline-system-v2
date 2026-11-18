@@ -1,4 +1,4 @@
-import {and, eq, getTableName, or, sql} from "drizzle-orm";
+import {and, eq, getTableName, or, sql, inArray} from "drizzle-orm";
 import {warehouse_db} from "./pgsql-warehouse.ts";
 import {
   create_raw_table,
@@ -13,6 +13,7 @@ export async function load_raw_records(
   execution_id : string,
   records : Raw_Record_Input[]
 ): Promise<number> {
+  // look into this later... why are we hard coding loading to do max 100 records at a time? Why only batches of 100? Couldn't we do da little more than that?
   if (records.length > 100) {
     throw new Error("Raw write batches must contain at most 100 records.");
   }
@@ -106,5 +107,72 @@ export async function load_raw_records(
       .where(eq(Pipeline_Execution_History.id, execution_id));
 
     return changed_records.length;
+  });
+}
+
+export async function mark_raw_records_deleted(
+  raw_table : ReturnType<typeof create_raw_table>,
+  execution_id : string,
+  source_record_ids : string[]
+): Promise<number> {
+  if (source_record_ids.length > 100) {
+    throw new Error("Raw deletion batches must contain at most 100 records.");
+  }
+
+  if (source_record_ids.some(source_record_id => !source_record_id.trim())) {
+    throw new Error("A Raw deletion is missing its source identity.");
+  }
+
+  if (new Set(source_record_ids).size !== source_record_ids.length) {
+    throw new Error("Raw deletion batch contains duplicate source identities.");
+  }
+
+  const pipeline_name = getTableName(raw_table);
+
+  return warehouse_db.transaction(async transaction => {
+    const [execution_record] = await transaction
+      .select({pipeline_name : Pipeline_Progress.pipeline_name})
+      .from(Pipeline_Execution_History)
+      .innerJoin(
+        Pipeline_Progress,
+        eq(
+          Pipeline_Execution_History.pipeline_progress_id,
+          Pipeline_Progress.id
+        )
+      )
+      .where(and(
+        eq(Pipeline_Execution_History.id, execution_id),
+        eq(Pipeline_Execution_History.status, "running")
+      ))
+      .for("update");
+
+    if (!execution_record || execution_record.pipeline_name !== pipeline_name) {
+      throw new Error("Raw deletion requires a running execution for this pipeline.");
+    }
+
+    const deleted_records = source_record_ids.length === 0 ? [] : await transaction
+      .update(raw_table)
+      .set({
+        deleted : true,
+        content_revision : sql`${raw_table.content_revision} + 1`,
+        processed : false,
+        execution_id : execution_id,
+        updated_at : sql`now()`
+      })
+      .where(and(
+        eq(raw_table.record_source, pipeline_name),
+        inArray(raw_table.source_record_id, source_record_ids),
+        eq(raw_table.deleted, false)
+      ))
+      .returning({id : raw_table.id});
+
+    await transaction
+      .update(Pipeline_Execution_History)
+      .set({
+        records_loaded : sql`${Pipeline_Execution_History.records_loaded} + ${deleted_records.length}`
+      })
+      .where(eq(Pipeline_Execution_History.id, execution_id));
+
+    return deleted_records.length;
   });
 }

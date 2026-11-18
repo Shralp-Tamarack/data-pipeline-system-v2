@@ -6,13 +6,15 @@
   "scripts": {
     "build": "tsc",
     "type-check": "tsc --noEmit",
+    "test": "node --test tests/*.test.ts",
     "sandbox": "cd sandbox && node",
     "gen-drizzle-ddl": "drizzle-kit generate",
     "exe-drizzle-ddl": "drizzle-kit migrate",
     "gen-exe-drizzle-ddl": "npm run gen-drizzle-ddl && npm run exe-drizzle-ddl",
     "reset-db": "node scripts/reset-database.ts",
     "ingest": "node core/system/pipeline-cli.ts ingest",
-    "sync": "node core/system/pipeline-cli.ts sync"
+    "sync": "node core/system/pipeline-cli.ts sync",
+    "process": "node core/system/pipeline-cli.ts process"
   },
   "keywords": [],
   "author": "",

@@ -15,6 +15,13 @@
       "when": 1794955271422,
       "tag": "0001_add-processed-locations",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795036976766,
+      "tag": "0002_rename-location-type",
+      "breakpoints": true
     }
   ]
 }

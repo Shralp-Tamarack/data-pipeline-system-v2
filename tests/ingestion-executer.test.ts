@@ -35,10 +35,10 @@ test("one ingestion flow with synthetic persistence and source adapters", async 
     mkdirSync(toast_directory, {recursive : true});
     writeFileSync(join(directory, "package.json"), '{"type":"module"}');
     symlinkSync(resolve(import.meta.dirname, "..", "node_modules"), join(directory, "node_modules"), "junction");
-    for (const filename of ["ingestion-executer.ts", "ingestion-windows.ts", "pipeline-orchestrator.ts", "system-schema.ts"]) {
+    for (const filename of ["ingestion-executer.ts", "ingestion-windows.ts", "processing-executer.ts", "pipeline-orchestrator.ts", "system-schema.ts"]) {
       copyFileSync(resolve(import.meta.dirname, "..", "core", "system", filename), join(system_directory, filename));
     }
-    for (const filename of ["toast-orders.ts", "toast-locations.ts", "toast-sync.ts", "toast-order-pagination.ts", "toast-request.ts", "toast-response.ts", "toast-schema.ts"]) {
+    for (const filename of ["toast-orders.ts", "toast-locations.ts", "toast-location-type-map.ts", "toast-sync.ts", "toast-order-pagination.ts", "toast-request.ts", "toast-response.ts", "toast-schema.ts"]) {
       copyFileSync(resolve(import.meta.dirname, "..", "core", "toast", filename), join(toast_directory, filename));
     }
     writeFileSync(join(toast_directory, "toast-configuration.ts"), `
@@ -146,7 +146,7 @@ export async function request_toast_authorized_json(url, options) {
     const {ingest_toast_orders} : Toast_Module = await import(pathToFileURL(join(toast_directory, "toast-orders.ts")).href);
     const {ingest_toast_locations, map_toast_location} : Locations_Module =
       await import(pathToFileURL(join(toast_directory, "toast-locations.ts")).href);
-    const {run_toast_sync} : typeof import("../core/toast/toast-sync.ts") =
+    const {execute_toast_sync} : typeof import("../core/toast/toast-sync.ts") =
       await import(pathToFileURL(join(toast_directory, "toast-sync.ts")).href);
     const {Raw_Toast_Orders} : Schema_Module = await import(pathToFileURL(join(toast_directory, "toast-schema.ts")).href);
     const {state} : {state : Test_State} = await import(pathToFileURL(join(directory, "test-state.ts")).href);
@@ -230,7 +230,7 @@ export async function request_toast_authorized_json(url, options) {
 
     await context.test("Toast sync finishes locations before starting orders", async () => {
       reset();
-      await run_toast_sync(signal);
+      await execute_toast_sync(signal);
 
       const locations_completed_at = log_entries.findIndex(entry =>
         entry.event === "pipeline_completed" &&
@@ -249,7 +249,7 @@ export async function request_toast_authorized_json(url, options) {
       reset();
       state.fail_catalog_read = true;
 
-      await assert.rejects(run_toast_sync(signal), /Pipeline execution .* failed/);
+      await assert.rejects(execute_toast_sync(signal), /Pipeline execution .* failed/);
 
       assert.equal(state.visits.length, 0);
       assert.equal(log_entries.some(entry =>
@@ -261,7 +261,7 @@ export async function request_toast_authorized_json(url, options) {
       reset();
       state.fail_restaurant = state.restaurants[0] ?? null;
 
-      await assert.rejects(run_toast_sync(signal), /Pipeline execution .* failed/);
+      await assert.rejects(execute_toast_sync(signal), /Pipeline execution .* failed/);
 
       assert.deepEqual(state.known_locations, state.restaurants);
       assert.ok(log_entries.some(entry =>

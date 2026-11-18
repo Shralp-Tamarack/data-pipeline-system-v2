@@ -8,7 +8,9 @@ Toast locations can be refreshed as a Raw snapshot, and Toast orders can be load
 
 Toast orders use **one flow for initial history and ongoing updates**: start at June 1, 2026, midnight UTC if no watermark exists, otherwise reread from one day before the saved watermark. Toast uses windows of up to 28 days; the shared fallback for other callers is seven days. The watermark advances only after all locations in a window finish.
 
-The first Processed table, `processed.locations`, and its Toast mapper are defined. The user confirmed the table exists in the experimental warehouse, but there is no writer or processing command yet. There are no Refined reports or scheduled worker. The existing per-pipeline overlap guard works within one Node process only.
+`npm run process -- toast-locations` processes all pending Raw locations in bounded transactions, then applies the reviewed location-type mapping even when no Raw work is pending. It writes the warehouse but does not contact Toast or advance the ingestion watermark. The user reported successful processing, repeat execution without duplicates, and application of the location types on the experimental target.
+
+Deletion handling is only partially built: a shared helper can mark confirmed Raw identities deleted and pending processing, but normal ingestion does not yet consume deletion metadata or restore reappearing records. No source automatically invokes deletion reconciliation. There are no Processed orders, Refined reports or scheduled worker. The existing per-pipeline overlap guard works within one Node process only.
 
 ## Safe getting started
 
@@ -24,19 +26,19 @@ The first Processed table, `processed.locations`, and its Toast mapper are defin
 
    ```powershell
    npm run type-check
-   node --test .\sandbox\ingestion-executer.test.ts .\sandbox\pipeline-progress.test.ts .\sandbox\ingestion-windows.test.ts .\sandbox\pipeline-orchestrator.test.ts .\sandbox\toast-order-extractor.test.ts .\sandbox\toast-order-pagination.test.ts .\sandbox\toast-response.test.ts
+   npm test
    ```
 
-`npm run build` compiles into `dist/`; it does not start the application or run pipelines. The selected offline tests use synthetic configuration/persistence and do not require credentials.
+`npm run build` compiles into `dist/`; it does not start the application or run pipelines. Automated tests live in [tests](tests/) and use synthetic configuration/persistence without credentials or live access. Connected checks and experiments remain in [sandbox](sandbox/) and are not included in `npm test`.
 
 **Do not run all sandbox files indiscriminately.** Some contact live Toast, some write warehouse metadata or Raw records, and the reset command is destructive. Review [command effects and target protection](documentation/setup-and-commands.md#commands-and-their-effects) first. No operational execution is part of the quick start.
 
 ## Documentation and continuation
 
 - [Architecture](documentation/architecture.md): current modules, source configuration, schemas and reliability limits.
-- [Data flow](documentation/data-flow.md): extraction, Raw transactions, completed-window checkpoints and failure/replay behavior.
+- [Data flow](documentation/data-flow.md): ingestion, processing, deletion boundaries and failure/replay behavior.
 - [Setup, commands and verification](documentation/setup-and-commands.md): configuration, command effects, migrations, reset safeguards and evidence.
 - [Next steps](plan/next-steps.md): where to resume and the next acceptance checks.
 - [Project plan](plan/project-plan.md): future delivery, business requirements and open decisions.
 
-**Next session:** build the [Processed locations writer](plan/next-steps.md#1-build-the-processed-locations-writer), then run it on its own and check that a rerun is a no-op. No new Toast calls, orders backfill, or additional migration is needed for that step on the verified experimental target.
+**Next session:** finish [deletion-aware Raw loading](plan/next-steps.md#1-finish-deletion-aware-raw-loading). The optional input field exists, but its loader changes have not been made. Start with offline code/tests, not new source calls, a backfill or a database mutation.

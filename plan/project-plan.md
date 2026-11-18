@@ -34,9 +34,9 @@ For what has actually been built, read [project documentation](../README.md). Fo
 
 ### Current delivery position
 
-The manual Toast workflow refreshes the Raw locations snapshot, then ingests Raw orders using the same checkpointed flow for initial history and ongoing updates. Structured logging and the Processed locations table and mapper are implemented. The user confirmed the table exists in the experimental warehouse; there is no Processed writer, Refined report or scheduled worker yet.
+As of November 18, 2026, the manual Toast workflow refreshes Raw locations, then ingests Raw orders using the same checkpointed flow for initial history and ongoing updates. Standalone locations processing, revision-safe batches, tracked finalization and the reviewed location-type mapping are implemented. The user reported successful experimental processing and repeat/type-application checks. Combined sync remains Raw-only; there are no Processed orders, Refined reports or scheduled worker.
 
-Continue with the [Processed locations writer](next-steps.md#1-build-the-processed-locations-writer), not a framework rewrite, new backfill, or database reset. See [setup and commands](../documentation/setup-and-commands.md) for verified evidence and outstanding live checks.
+The shared confirmed-deletion helper is implemented and offline-tested, and `Raw_Record_Input.deleted?` exists. Normal loading does not yet consume that field or restore records; no automatic deletion detector is connected. Continue with [deletion-aware Raw loading](next-steps.md#1-finish-deletion-aware-raw-loading), not a framework rewrite, new backfill or database reset. See [setup and commands](../documentation/setup-and-commands.md#what-has-been-verified) for evidence and outstanding live checks.
 
 ## 2. Target architecture
 
@@ -46,7 +46,7 @@ Manual commands / future central node-cron scheduler
               Source sync workflow
                      |
              Shared ingestion executer
-    run tracking, busy guard, windows, checkpoints
+ execution tracking, busy guard, windows, checkpoints
                      |
              Source-specific adapter
       authentication, pagination, query/file reading
@@ -77,7 +77,7 @@ The planned central scheduler invokes the same source workflows as manual execut
 - **Ingestion executer:** source-start/watermark selection, fixed run end, sequential windows/batches and completed-window checkpoints.
 - **Extraction contract:** an async iterable of bounded record batches; the source adapter owns paging and scope traversal.
 - **Raw loader:** validated identities, bulk upserts, revision tracking and atomic committed counts.
-- **Processing executer (planned):** bounded reads, transformation failures, replay and transaction-safe acknowledgments.
+- **Processing executer:** drains transactional batches under one tracked execution and supports finalization before success, including no-pending-work executions. Locations supplies the first writer; general mapping-version replay remains planned.
 - **Scheduler (planned):** explicit task registry and source cadences; leaves step ordering to the source workflow.
 - **Logger:** structured events correlated to durable run history.
 
@@ -165,15 +165,21 @@ Retain the chosen latest-state model: one current payload per logical source rec
 
 ## 6. Reconciliation and deletion
 
-- Reconciliation is an explicit source capability, enabled only when a complete inventory of the intended scope can be obtained.
-- Incremental responses or date-filtered order lists are not complete deletion inventories.
-- Stage inventory keys in PostgreSQL in batches; do not build an unbounded in-memory set.
-- Persist snapshot scope and completion. No deletions are applied until the full inventory succeeds and safety checks pass.
-- Guard against empty/truncated inventories, excessive deletion ratios, and source instability. Document approved handling of legitimate empty sources.
-- Coordinate reconciliation with ingestion and use its snapshot cutoff so new arrivals are not mistaken for missing records.
-- Apply corresponding Raw/Processed soft deletes atomically. For large inventories, use bounded transactions with durable progress; do not claim whole-run atomicity if updates commit in chunks.
-- Handle reappearance explicitly and preserve internal identities.
-- Keep deletion reconciliation disabled for Toast orders until a reliable inventory is verified.
+Keep the design simple: **detect a confirmed deletion, mark Raw deleted/pending, process that revision, and exclude the deleted Processed data from analytics.** Use the same path for different sources; only deletion detection needs source-specific knowledge. Prefer small shared functions over a generic reconciliation engine.
+
+The [implemented helper and current limits](../documentation/architecture.md#confirmed-deletion-helper-partial-implementation) are not end-to-end reconciliation. Remaining work:
+
+- Teach normal loading the optional deletion metadata: explicit `true` deletes, explicit `false` restores, omission preserves an existing flag. Payload or effective status changes must queue processing; repeat input must be a no-op.
+- Preserve internal identities and original content when marking known IDs deleted. Commit each Raw change and history count atomically.
+- Each Processed writer must propagate deletion/restoration and acknowledge the exact Raw revision in its own transaction. Raw and Processed changes are separate stages, not one whole-pipeline atomic transaction. Failed processing leaves pending work and stale downstream state that must be visible.
+- Verify source-specific explicit deletion delivery before claiming coverage. A reliable deletion flag/change feed does not require a separate full inventory solely to apply its confirmed deletions.
+- For sources that remove records without a deletion signal, compare only a successfully completed, authoritative inventory of the same scope. Incremental/date-filtered responses are not complete deletion inventories.
+- Implement bounded identity storage and completion/scope evidence when a concrete inventory use case needs them. Never use Raw `execution_id` as a last-seen marker or buffer an unbounded inventory.
+- Guard against truncated/empty inventories, permission/filter changes, excessive deletion counts and concurrent arrivals. Coordinate scans and writes; no missing-record deletions after a failed scan.
+- Handle removed children within their verified parent scope when flattening nested records. Keep deletion, void and refund meanings separate.
+- Verify report/model filters explicitly; storing `deleted = true` alone does not exclude a row from SQL results.
+
+Toast missing-order reconciliation remains disabled until its inventory or other deletion-detection contract is verified. Complete the next loader step and focused tests before adding source calls or inventory infrastructure.
 
 ## 7. Central scheduling and execution safety
 
@@ -215,9 +221,20 @@ Use explicit foreign keys, delete behavior, indexes for lookups, and retention r
 - Report freshness follows published data coverage, not merely the most recent job start time.
 - Operational logs are not tamper-proof audit history or full source-version retention; do not claim otherwise.
 
-## 9. First business use case
+## 9. Reporting milestones
 
-Weekly restaurant net sales versus comparable weeks last year, with a location filter and visible coverage/freshness.
+### First usable chart: Daily Food & Beverage Net Sales
+
+Show one line for daily net sales across reviewed food-and-beverage locations over the latest 30 completed business days, with an optional location filter and a visible `Data through` date. This answers whether recent sales are rising or falling without requiring prior-year data.
+
+- Use the source business date, not the ingestion timestamp. Exclude the current incomplete business day.
+- Treat a verified day with no sales as zero; show missing or incomplete coverage as a gap. Do not silently include unclassified locations or assume all expected locations are covered.
+- This first chart measures net sales **at F&B locations**, not sales of F&B items across the resort. Item-level categories are needed if mixed outlets must separate food and merchandise.
+- Reconcile one completed day at one location against Toast Sales Summary before widening the scope. Agree on the net sales definition, including discounts, refunds, voids, taxes and service charges; do not use payment totals as a substitute.
+
+### Later: Weekly Restaurant Net Sales vs. Last Year
+
+Compare weekly restaurant net sales against comparable weeks last year, with a location filter and visible coverage/freshness. Add this once comparable prior-year coverage is verified; missing prior-year periods are unavailable, not zero.
 
 - `Dim_Location`: stable business locations.
 - `Dim_Date`: business dates and agreed comparable-period rules.
@@ -226,7 +243,7 @@ Weekly restaurant net sales versus comparable weeks last year, with a location f
 
 Verify original-order reconstruction in Toast and Info Genesis before implementing the fact. Agree on sales, discounts, refunds, taxes, service charges, voids, timezone, and business-date meanings. Do not assume payment totals equal sales.
 
-The Toast mapping in the previous project does not subtract refunds; its Info Genesis item mapping has no business date. That code is reference material, not evidence that these gaps are solved. This project has a location mapper but no Processed order mapping or verified financial model yet.
+The Toast mapping in the previous project does not subtract refunds; its Info Genesis item mapping has no business date. That code is reference material, not evidence that these gaps are solved. This project has a working locations writer and reviewed type mapping but no Processed order mapping or verified financial model yet.
 
 ## 10. Delivery sequence and acceptance gates
 
@@ -249,9 +266,11 @@ The Toast mapping in the previous project does not subtract refunds; its Info Ge
 
 ### Phase 3 - Processing and first report
 
-- First, finish the locations writer and prove atomic revision acknowledgment, no-op reruns, and preservation of reviewed classifications. Then implement Processed orders, replay and record-error handling as needed.
-- Build restaurant Refined models and the chart's reporting query; choose the report UI tool separately.
-- **Gate:** a completed day's totals reconcile with a trusted Toast report, including explicit refund/void cases.
+- Retain the completed locations writer and mapping finalization, focused offline transaction/failure tests, and basic user-reported experimental processing/repeat results. Real PostgreSQL revision/concurrency and rollback checks remain separate evidence gaps.
+- Finish deletion-aware Raw loading, source detection and Processed propagation/restoration before relying on financial reports. Reuse the confirmed-deletion helper; add complete-inventory comparison only for a verified source scope that needs it.
+- Then implement Processed orders, mapping-version replay and record-error handling as needed. Reconcile one completed day/location before expanding.
+- Build the Refined daily net sales query and 30-day F&B trend chart; choose the report UI tool separately. Defer the year-over-year chart until comparable history is verified.
+- **Gate:** a completed day's totals reconcile with a trusted Toast report, including explicit refund/void cases, and the chart distinguishes missing coverage from verified zero sales.
 
 ### Phase 4 - Historical coverage and second-source proof
 
@@ -274,7 +293,7 @@ The Toast mapping in the previous project does not subtract refunds; its Info Ge
 
 ## 11. Required verification
 
-Existing focused offline tests cover window boundaries, strict Toast pagination/response bounds, process-local overlap, configured ingestion control flow and synthetic checkpoint transaction logic. The reset-guard suite separately uses fake persistence. Broader required cases below are not all implemented:
+Existing offline tests live in `tests/` and run through `npm test`; connected/ad hoc checks remain in `sandbox/` and are excluded. Coverage includes windows, Toast pagination/response bounds/retries, process-local overlap, ingestion/checkpoints, CLI routing, processing/finalization, type-application failure/replay, and confirmed Raw deletion. The reset-guard suite uses fake persistence. See [verification evidence](../documentation/setup-and-commands.md#what-has-been-verified) for actual command results; normal-loader deletion/restoration is not yet implemented or tested. Broader required cases below are not all implemented:
 
 - Scoped/compound keys, invalid identities, duplicate/replayed records, unchanged and older revisions.
 - Commit/checkpoint failure boundaries, retries, cancellation, and interrupted resume.
@@ -305,4 +324,4 @@ Resolve before the relevant implementation:
 6. Deployment supervisor/hosting and report UI; cross-process database coordination only if the one-worker assumption changes.
 7. Realistic volume, payload-size, memory, and backfill throughput budgets.
 
-**Immediate next step:** build and verify the [standalone Processed locations writer](next-steps.md#1-build-the-processed-locations-writer). Keep it out of the combined sync until it proves it can write and acknowledge a batch atomically, rerun safely, and leave the orders watermark alone.
+**Immediate next step:** finish [deletion-aware Raw loading](next-steps.md#1-finish-deletion-aware-raw-loading), preserving explicit-status versus omitted-status semantics and the existing context guard. Add focused offline tests before connecting source detection. No new migration, source call, backfill or warehouse mutation is needed for that edit. Keep combined sync's Raw-only behavior unchanged until processing integration is deliberately requested and tested.

@@ -25,6 +25,7 @@ test("Toast window extraction with synthetic configuration and mocked fetch", as
     for (const filename of [
       "toast-orders.ts",
       "toast-locations.ts",
+      "toast-location-type-map.ts",
       "toast-authentication.ts",
       "toast-response.ts",
       "toast-request.ts",
@@ -49,7 +50,13 @@ export const toast_configuration = {request_page_size : 100};
     writeFileSync(join(toast_directory, "toast-schema.ts"), `
 export const Raw_Toast_Orders = {};
 export const Raw_Toast_Locations = {};
+export const Processed_Locations = {};
 export const toast_locations_pipeline_name = "toast_locations";
+export const toast_source_system_name = "toast";
+`);
+    writeFileSync(join(system_directory, "system-schema.ts"), `
+export const Pipeline_Execution_History = {};
+export const Pipeline_Progress = {};
 `);
     writeFileSync(join(system_directory, "pgsql-warehouse.ts"), `
 export const warehouse_db = {
@@ -58,6 +65,7 @@ export const warehouse_db = {
 `);
     for (const [filename, export_name] of [
       ["ingestion-executer.ts", "execute_ingestion"],
+      ["processing-executer.ts", "execute_processing"],
       ["pipeline-orchestrator.ts", "execute_pipeline"],
       ["raw-pipeline-loader.ts", "load_raw_records"]
     ] as const) {

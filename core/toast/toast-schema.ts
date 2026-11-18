@@ -22,7 +22,7 @@ export const Raw_Toast_Orders = create_raw_table(
   toast_orders_pipeline_name
 );
 
-export type Location_Business_Type =
+export type Location_Type =
   | "food_and_beverage"
   | "retail"
   | "unclassified";
@@ -33,8 +33,8 @@ export const Processed_Locations = Processed_Schema.table("locations", {
   ...processed_location_columns.identity_columns,
 
   name : text("name").notNull(),
-  business_type : text("business_type")
-    .$type<Location_Business_Type>()
+  type : text("type")
+    .$type<Location_Type>()
     .notNull()
     .default("unclassified"),
 
@@ -45,7 +45,7 @@ export const Processed_Locations = Processed_Schema.table("locations", {
   index("locations_raw_record_id_idx").on(table.raw_record_id),
   check("locations_name_not_blank", sql`btrim(${table.name}) <> ''`),
   check(
-    "locations_business_type_valid",
-    sql`${table.business_type} IN ('food_and_beverage', 'retail', 'unclassified')`
+    "locations_type_valid",
+    sql`${table.type} IN ('food_and_beverage', 'retail', 'unclassified')`
   )
 ]);

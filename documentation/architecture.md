@@ -14,27 +14,30 @@ Shared execution and persistence live in `core/system/`; source knowledge is col
 | [pipeline-progress.ts](../core/system/pipeline-progress.ts) | Registers progress and persists completed-window checkpoints |
 | [pipeline-history.ts](../core/system/pipeline-history.ts) | Records execution starts and terminal outcomes |
 | [pipeline-orchestrator.ts](../core/system/pipeline-orchestrator.ts) | Owns durable execution outcomes, per-run log context and the process-local per-pipeline busy guard |
-| [pipeline-cli.ts](../core/system/pipeline-cli.ts), [pipeline-registry.ts](../core/system/pipeline-registry.ts) | Manual `ingest` and `sync` commands, argument routing, cancellation and pool cleanup |
+| [pipeline-cli.ts](../core/system/pipeline-cli.ts), [pipeline-registry.ts](../core/system/pipeline-registry.ts) | Separate ingestion/processing registries, manual `ingest`, `process` and `sync` routing, cancellation and pool cleanup |
 | [system-logger.ts](../core/system/system-logger.ts) | Pino JSON stdout with optional compact `pino-pretty` output |
 | [ingestion-types.ts](../core/system/ingestion-types.ts) | Shared Raw record input and source ingestion configuration types |
 | [ingestion-windows.ts](../core/system/ingestion-windows.ts) | Generates consecutive source-time windows |
 | [ingestion-executer.ts](../core/system/ingestion-executer.ts) | Sequentially extracts/loads windows and checkpoints configured ingestion |
-| [raw-pipeline-loader.ts](../core/system/raw-pipeline-loader.ts) | Commits bounded Raw upserts and history counts together |
+| [processing-executer.ts](../core/system/processing-executer.ts) | Drains pending batches under one execution; invokes optional finalization before success, including with no pending rows |
+| [raw-pipeline-loader.ts](../core/system/raw-pipeline-loader.ts) | Bounded Raw upserts and a separate confirmed-deletion helper, each transactional with history counts |
 | [toast-configuration.ts](../core/toast/toast-configuration.ts) | Toast start date, orders window size and page size |
 | [toast-schema.ts](../core/toast/toast-schema.ts) | Raw orders and locations, and `processed.locations` |
 | [toast-sync.ts](../core/toast/toast-sync.ts) | Runs Raw locations before Raw orders; no processing or scheduling yet |
 | [toast-orders.ts](../core/toast/toast-orders.ts) | Business-date pilot reader, modification-time extractor and configured orders ingestion |
-| [toast-locations.ts](../core/toast/toast-locations.ts) | Location discovery, Raw snapshot ingestion and the Processed location mapper |
+| [toast-locations.ts](../core/toast/toast-locations.ts) | Discovery, Raw snapshots, revision-safe Processed writes and application of location types |
+| [toast-location-type-map.ts](../core/toast/toast-location-type-map.ts) | Reviewed GUID-to-type mapping, independent of source payloads and Raw revisions |
 | [toast-order-pagination.ts](../core/toast/toast-order-pagination.ts) | Validates the next-page link and unchanged extraction filters |
 | [toast-authentication.ts](../core/toast/toast-authentication.ts), [toast-request.ts](../core/toast/toast-request.ts), [toast-response.ts](../core/toast/toast-response.ts) | Token reuse/refresh, bounded retries, pacing and bounded JSON reads |
-| [sandbox](../sandbox/) | Manually invoked connected checks and focused offline tests |
+| [tests](../tests/) | Automated offline tests using synthetic persistence and source responses |
+| [sandbox](../sandbox/) | Manually invoked connected checks and experiments; excluded from `npm test` |
 | [system-scheduler.ts](../core/system/system-scheduler.ts) | Empty placeholder; no scheduling behavior |
 
 Reports and analytics will be organized around users' business questions and decisions, not these technical folders or source names.
 
 ## Configuration and database boundary
 
-[Shared environment configuration](../core/system/system-configuration.ts) exports one typed `env_vars` object after required-value and environment-name checks. It currently holds warehouse and Toast connection/authentication settings. Source ingestion settings are separate: `Source_System_Configuration` currently requires only `data_start_date : Date`, and Toast exports its own `toast_configuration`.
+[Shared environment configuration](../core/system/system-configuration.ts) exports one typed `env_vars` object after required-value and environment-name checks. It currently holds warehouse and Toast connection/authentication settings. Source ingestion settings are separate: `Source_System_Configuration` requires `data_start_date` and `window_size_in_days`, with optional `request_page_size`; Toast exports its own `toast_configuration`.
 
 Toast's date is `2026-06-01T00:00:00.000Z`, selected by the user, not independently verified as the first available record date. It is used only when the orders pipeline has no watermark. Changing this setting does not reset existing progress. `log_format` is separate from target selection and defaults to `json`.
 
@@ -93,7 +96,7 @@ Each table has source-identity, pending-processing and execution-ID indexes; his
 
 - Inserts new rows with revision 1.
 - Updates changed payloads while preserving internal/source identity and creation time.
-- Increments revision, clears `processed`, and changes execution/update metadata only for changed payloads.
+- Increments revision, clears `processed`, and changes execution/update metadata only for changed payloads in the ordinary upsert path.
 - Leaves unchanged payloads untouched and counts them as zero changes.
 - Stores context on insert; omission on replay preserves it.
 - Rejects the entire transaction if supplied context conflicts, including stored SQL NULL.
@@ -101,7 +104,15 @@ Each table has source-identity, pending-processing and execution-ID indexes; his
 
 Row-count bounds do not replace producer byte bounds. The loader does not advance checkpoints; the executer calls the separate completed-window transaction after all batches finish. User-reported synthetic warehouse checks cover mutation, replay, context rollback and rollback after a history-count overflow. Concurrent context writes and source-version ordering remain unverified.
 
-Current Raw has no source-version guard, full revision archive, deletion/reappearance handling or automatic NULL-context correction. Applying the existing baseline was user-reported, not independently inspected live.
+Current Raw has no source-version guard, full revision archive, automatic deletion detection, normal-ingestion restoration or automatic NULL-context correction. Applying the existing baseline was user-reported, not independently inspected live.
+
+### Confirmed-deletion helper: partial implementation
+
+`mark_raw_records_deleted` accepts a Raw table, a running execution ID and at most 100 unique nonblank source IDs. It locks and verifies history/progress before updating matching, currently active rows in that pipeline. It sets `deleted = true`, increments `content_revision`, clears `processed`, and updates execution/time metadata without replacing content, context or identity. The same transaction increments history `records_loaded` by changed rows; this counter includes Raw deletion changes when this helper is used.
+
+Repeated deletion is a no-op. Unknown IDs are not inserted. An empty batch still requires a valid execution. Synthetic tests cover scope predicates, replay, batch/input validation and rollback; live PostgreSQL behavior of this helper has not been tested.
+
+`Raw_Record_Input.deleted?` exists as a type declaration only. **`load_raw_records` does not read it yet**, so supplying `true` or `false` currently has no effect on Raw deletion metadata. The helper is not called by current Toast pipelines, and there is no complete-inventory comparison or restoration path. This is not end-to-end deletion reconciliation. See [the next implementation step](../plan/next-steps.md#1-finish-deletion-aware-raw-loading).
 
 ## Toast extraction boundary
 
@@ -117,7 +128,15 @@ Eligible transient failures have up to three attempts with bounded backoff and `
 
 ## Processed, Refined and reliability limits
 
-The [Processed locations schema](../core/toast/toast-schema.ts) uses shared provenance columns and a unique `(source_system, source_record_id)` key. Its Raw foreign key currently points to `raw.toast_locations`. The Toast mapper validates and chooses `locationName` with `restaurantName` as a fallback, and preserves the Raw revision and soft-deletion state. `business_type` defaults to `unclassified`; the mapper does not assign it. The table and mapper exist, but no writer, revision acknowledgment, processing command, Refined model or report is implemented.
+The [Processed locations schema](../core/toast/toast-schema.ts) uses shared provenance columns and a unique `(source_system, source_record_id)` key. Its Raw foreign key currently points to `raw.toast_locations`. The Toast mapper validates and chooses `locationName` with `restaurantName` as a fallback. It records the Raw revision and maps deletion as `raw.deleted OR content.deleted`.
+
+The shared processing executer repeatedly invokes a transactional batch callback until it returns zero. Each location batch locks history/progress before up to 100 pending Raw rows in stable ID order. It commits Processed upserts, exact Raw ID/revision acknowledgments and `records_processed` together. There is no 100-record limit on the complete execution. The upsert preserves Processed identity, creation time, source ownership and `type`; failures roll back that batch, not earlier commits.
+
+`processed.locations.type` uses `Location_Type`: `food_and_beverage`, `retail` or `unclassified`. Migration `0002` renames the former `business_type` column without recreating the table. The mapper leaves this business-owned field alone. The separate [location type map](../core/toast/toast-location-type-map.ts) explicitly maps 18 source GUIDs: four retail and fourteen F&B. El Pueblo is provisionally retail by user instruction; The Market is F&B. These are user-reviewed decisions, not independently verified Finance classifications. Names are comments for maintenance, not lookup keys.
+
+After Raw batches drain, `apply_toast_location_types` runs as the optional finalization callback inside the same tracked processing execution and busy guard. Its separate transaction updates only changed `type`/`updated_at` values, including when Raw has no pending changes. Missing mapped locations, an empty map, invalid target environment or write failure prevent success. New unmapped locations stay `unclassified`; existing unmapped classifications are not reset. This step logs `location_types_applied` with `locations_updated`; it does not inflate Raw `records_processed` or overwrite processing provenance.
+
+If finalization fails, committed processing batches remain saved and the execution fails. A later execution retries finalization even with zero pending Raw. No processing-version replay selector, record-error recovery mechanism, Processed order writer, Refined model or report exists. Advancing `location_processing_version` alone does not reprocess acknowledged Raw rows.
 
 The central busy guard prevents the same exact pipeline name from overlapping **within one Node process**, before history registration. Different pipelines may run independently. The guard clears in `finally`, including persistence failures. Use one worker, do not run standalone ingestion while it is active, and stop the old worker before starting its replacement. This does not coordinate different terminals/processes; database-backed whole-execution locking is deferred unless deployment requirements change.
 

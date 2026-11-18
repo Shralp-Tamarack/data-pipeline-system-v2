@@ -16,6 +16,6 @@
     "forceConsistentCasingInFileNames" : true,
     "sourceMap" : true
   },
-  "include" : ["core/**/*.ts", "scripts/**/*.ts", "sandbox/**/*.ts", "drizzle.config.ts"],
+  "include" : ["core/**/*.ts", "scripts/**/*.ts", "sandbox/**/*.ts", "tests/**/*.ts", "drizzle.config.ts"],
   "exclude" : ["node_modules", "dist"]
 }

@@ -3,7 +3,7 @@ import {isDeepStrictEqual} from "node:util";
 import {and, eq, inArray} from "drizzle-orm";
 import {env_vars} from "../core/system/system-configuration.ts";
 import {warehouse_db, warehouse_pool} from "../core/system/pgsql-warehouse.ts";
-import {execute_pipeline} from "../core/system/pipeline-orchestrator.ts";
+import {execute_tracked_pipeline_operation} from "../core/system/pipeline-operation.ts";
 import {get_or_create_pipeline_progress} from "../core/system/pipeline-progress.ts";
 import {load_raw_records} from "../core/system/raw-pipeline-loader.ts";
 import {Pipeline_Execution_History} from "../core/system/system-schema.ts";
@@ -43,7 +43,7 @@ try {
     return !previous_record || !isDeepStrictEqual(previous_record.content, record.content);
   }).length;
 
-  const {execution_id} = await execute_pipeline(
+  const {execution_id} = await execute_tracked_pipeline_operation(
     toast_orders_pipeline_name,
     "sandbox-raw-page-replay",
     async current_execution_id => {

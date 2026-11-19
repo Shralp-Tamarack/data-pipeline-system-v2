@@ -4,7 +4,7 @@ import {isDeepStrictEqual} from "node:util";
 import {and, eq, inArray} from "drizzle-orm";
 import {env_vars} from "../core/system/system-configuration.ts";
 import {warehouse_db, warehouse_pool} from "../core/system/pgsql-warehouse.ts";
-import {execute_ingestion} from "../core/system/ingestion-executer.ts";
+import {execute_ingestion} from "../core/system/ingestion.ts";
 import {get_or_create_pipeline_progress} from "../core/system/pipeline-progress.ts";
 import {Pipeline_Execution_History} from "../core/system/system-schema.ts";
 import {

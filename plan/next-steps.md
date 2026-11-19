@@ -2,53 +2,48 @@
 
 ## Where we stopped
 
-Paused on November 18, 2026, **before editing the normal Raw loader to handle deletion metadata**. The user is building the source code with step-by-step guidance; the assistant handles delegated test updates. Do not treat the last proposed loader changes as implemented.
+Paused at the end of November 19, 2026, **after completing the shared processing refactor and focused naming cleanup**. The code is at a completed development milestone, not halfway through a refactor. The next milestone is Processed orders and the first draft sales report.
+
+### Start here tomorrow
+
+1. Inspect order/check field names from a small sample of existing experimental Raw orders. Verify the target first; do not dump customer/payment values or rerun ingestion just to inspect structure. This inspection has not happened yet.
+2. Choose the smallest Processed order/check model needed for daily F&B net sales.
+3. Build the mapper and writer using the shared processor, then register orders processing.
+4. Build the draft report and compare one completed day with Toast before trusting its totals.
+
+The user wants simple, incremental explanations and normally writes application code with guidance; assistant implementation and test updates are delegated explicitly. Keep the next step small. Follow the [Pragmatic Testing standards](../.github/copilot-instructions.md#pragmatic-testing), not an exhaustive test matrix.
 
 Completed capabilities and verification boundaries are described in [architecture](../documentation/architecture.md), [data flow](../documentation/data-flow.md) and [setup and commands](../documentation/setup-and-commands.md#what-has-been-verified):
 
-- Raw Toast ingestion and manual Raw-only sync.
-- Reusable processing executer, standalone `process -- toast-locations`, revision-safe bounded location writes, and optional finalization inside the tracked execution.
+- Raw Toast ingestion at pipeline and source scope. Use `ingest -- toast` for the former Raw-only sync behavior.
+- `sync -- toast-locations` composes ingestion and processing. The full source and order syncs reject before work until orders processing is registered. See the [command matrix](../documentation/setup-and-commands.md#commands-and-their-effects).
+- Shared `process_pending_raw_records` in [processing.ts](../core/system/processing.ts) now owns Raw selection/locking, one batch transaction, exact revision acknowledgment and history counts. Each pipeline supplies a writer using that same transaction; locations is the working example.
+- [pipeline-operation.ts](../core/system/pipeline-operation.ts) tracks one operation, not a whole sync. [pipeline-workflow.ts](../core/system/pipeline-workflow.ts) orders operations and pipelines; the future scheduler only decides when source sync runs.
 - Reviewed location-type mapping applied even with zero pending Raw. The user reported successful experimental processing, no duplicate locations on repeat, and successful type application/repeat checks.
 - Additive `0002` migration renaming the Processed column to `type`; source code and offline fixtures use `Location_Type`. Live migration history was not independently inspected.
 - Shared `mark_raw_records_deleted` helper and offline tests. It marks confirmed existing Raw identities deleted and pending; **no source pipeline calls it automatically**.
-- Optional `deleted? : boolean` on `Raw_Record_Input`. **`load_raw_records` currently ignores that field.**
+- Ordinary Raw loading applies optional deletion metadata: explicit `true` deletes, explicit `false` restores, omission preserves an existing flag. Payload or effective status changes queue processing; repeat input does not.
+- Toast order and location schemas require boolean `deleted` and forward it as Raw input metadata while preserving source content. Missing/null/string flags fail explicitly.
+- Latest type-check and **70 affected offline tests** passed after the naming cleanup. Earlier Raw deletion tests passed separately; see [verification evidence](../documentation/setup-and-commands.md#what-has-been-verified). No latest full-suite or live deletion result is claimed.
 
-There are no Processed orders, complete-inventory deletion detection, normal-ingestion restoration, Refined reports or scheduled worker. Do not rerun migrations, source ingestion or a backfill merely to resume this step.
+Current module names are `ingestion.ts`, `processing.ts` and `pipeline-operation.ts`; imports and documentation links were updated. Existing test/sandbox filenames and public commands were deliberately retained. Naming defaults are in [the coding standards](../.github/copilot-instructions.md#name-by-meaning-and-role): responsibility-based module names, action-based functions/scripts, and optional boolean prefixes. Avoid another naming/refactoring pass before building orders.
 
-## 1. Finish deletion-aware Raw loading
+There are no Processed orders, complete-inventory deletion detection, Refined reports or scheduled worker. No live source deletion/restoration has been verified. The foundation is ready to build on, not certified for unattended operational use; a second real source still needs to prove broader reuse. Today's processing/CLI/naming changes required no migration. Do not rerun migrations, ingestion or a backfill merely to resume.
 
-Continue in [raw-pipeline-loader.ts](../core/system/raw-pipeline-loader.ts), using the existing [input type](../core/system/ingestion-types.ts). Keep the implementation small and reusable, not a configurable reconciliation platform.
+## 1. Use Toast's returned deletion flags
 
-### Required behavior
+The user shared a reply from Toast Developer Support's AI agent: order deletion changes `modifiedDate`, making the order eligible for that window with `deleted = true`; retention and exceptions weren't specified. Use the existing feed for normal ingestion. Do not add a full-ID scan, a webhook or a no-op `reconcile` handler. See [the documented contract](../documentation/architecture.md#toast-deletion-contract-and-access-limits).
 
-| Incoming deletion metadata | New Raw row | Existing Raw row |
-| --- | --- | --- |
-| `true` | Insert deleted and pending | Mark deleted if status changed |
-| `false` | Insert active and pending | Restore if previously deleted |
-| Omitted | Default active | Preserve existing deletion status |
+Before relying on deletion handling in reports, check existing experimental Raw flags against the saved source flags and verify that Processed locations reflect current Raw revisions. Older rows may predate the flag wiring. No deleted examples means the check is inconclusive; don't delete live source data to make a test case.
 
-1. Include the supplied deletion status on insert.
-2. On conflict, distinguish explicit `false` from omission for each record, including mixed batches.
-3. Update when payload **or effective deletion status** changes. Preserve the existing context-conflict guard.
-4. A real change increments revision, clears `processed`, updates execution/time metadata, and contributes once to history. Identical replay changes nothing.
-5. Keep Raw writes and history counts in the existing transaction. Preserve identity, payload provenance and the existing confirmed-deletion helper.
+## 2. Preserve deletion and historical-data correctness
 
-The last proposed implementation used the IDs with explicitly supplied status to build a parameterized SQL `CASE`: use `excluded.deleted` only for those IDs, otherwise preserve the stored flag. Confirm the current code before coaching the edit; do not assume it has been pasted. No schema migration is required.
-
-### Acceptance checks
-
-The assistant should add focused offline loader tests for active-to-deleted and deleted-to-active transitions with unchanged content, omitted status preserving a deleted row even when content changes, mixed-status batches, new deleted rows, no-op replay, context-conflict rollback and history failure rollback. Run type-check and affected tests; make no live requests during this stage.
-
-## 2. Connect source deletion detection and Processed propagation
-
-The common outcome is simple: confirmed source deletion marks Raw deleted and pending; successful processing carries the flag to Processed; analytics excludes deleted data. Restoration follows the same revision-safe processing path and preserves identities.
-
-- Translate verified source deletion flags into the shared input metadata at the adapter boundary. Validate the external values there; do not put Toast-specific payload inspection in the shared loader.
-- Use `mark_raw_records_deleted` for confirmed deleted IDs whose full payload is not available. It accepts at most 100 IDs per transaction; larger sets require bounded batches. It does not discover deletions or advance the ingestion watermark.
-- Verify Toast's actual order-deletion contract before claiming the modification-time feed catches every deletion. The API exposes deletion fields, but field existence alone is not evidence of delivery/retention guarantees.
-- The location mapper currently uses `raw.deleted OR content.deleted`. Verify delete/restore behavior with consistent source flags; Raw restoration cannot override a payload that still says deleted.
-- Later Processed order/check/selection writers must handle relevant deletion and child-disappearance semantics. A removed child is not automatically a deleted parent; voids and refunds are different business states.
-- Verify deletion reaches Processed through the real workflow, then verify report queries exclude it. There are no current analytics views enforcing this.
+- Retain the completed [Raw loader](../core/system/raw-pipeline-loader.ts) and Toast adapter wiring. `Raw_Record_Input.deleted?` is input metadata, not a new database column.
+- Use `mark_raw_records_deleted` only when a source supplies confirmed deleted IDs without full payloads. It accepts at most 100 IDs per transaction and neither discovers deletions nor advances ingestion progress.
+- The location mapper uses `raw.deleted OR content.deleted`. Real-workflow delete/restore verification remains outstanding; both flags must say active to restore Processed.
+- Do not mark historical orders deleted simply because a location closes or our integration loses access. Future reporting must distinguish inactive locations, access/coverage loss and actual transaction deletion.
+- Later Processed order/check/selection writers must preserve the relevant deletion and child-disappearance semantics. A removed child is not automatically a deleted parent; voids and refunds are different business states.
+- Verify downstream behavior before trusting reports. No analytics views currently enforce deletion or historical-location policies.
 
 ### Sources that omit deleted records
 
@@ -56,26 +51,27 @@ Only infer deletion from a complete, authoritative current list for the same sou
 
 Start with the first concrete source that needs this. Share only the comparison/write behavior that is actually reusable. Require successful scan completion, correct scope, bounded identity storage and safeguards for empty/truncated inventories or changed permissions. Do not buffer an unbounded inventory or add a generic framework in anticipation of all sources. The Raw `execution_id` is not a last-seen marker because unchanged upserts do not refresh it.
 
-**Gate before financial reporting:** deletion and restoration are covered for the selected source scope, processing propagates the state, failures remain recoverable, and gaps in source detection are explicit. Do not promise every Processed row is current while processing is failing.
+**Gate before financial reporting:** source delivery guarantees and any coverage limits are established for the selected scope, processing propagates state, historical-location handling is correct, and failures remain recoverable. Do not promise every Processed row is current while processing is failing.
 
 ## 3. Process orders and reconcile one completed day
 
-Resume order/check field inspection only after the deletion-loading foundation is in place. Inspect the minimum necessary structure without sharing customer/payment details.
+The deletion-loading foundation is now in place. The next implementation milestone is Processed orders; begin with a small order/check field review and explain each step before asking the user to build it. Inspect the minimum necessary structure without sharing customer/payment details. Any live source access or warehouse work remains separately deliberate and target-verified.
 
 - Candidate pilot: November 17, 2026 at 7 Devils; a user-supplied aggregate query showed 28 Raw orders. Verify coverage before treating that count as complete. No order/check payload inspection or financial reconciliation has happened.
 - Resolve location lineage without silently dropping orders with unknown locations.
 - Design useful Processed order/check records from actual source contracts, not a copy of every Raw field. Use exact decimal handling for money and the existing transactional processing pattern.
-- Reconcile against Toast Sales Summary for the same completed business day/location, including discounts, refunds, voids, split checks, tax and service-charge treatment.
+- Follow `process_toast_locations` and `write_processed_locations` in [toast-locations.ts](../core/toast/toast-locations.ts). Supply the orders Raw table and a writer to [process_pending_raw_records](../core/system/processing.ts). The writer maps and writes through the supplied transaction; it must not open another transaction, acknowledge Raw, or increment history itself. One Raw record may produce multiple output records, but `records_processed` counts acknowledged Raw records.
+- Register the orders processing handler in the [pipeline registry](../core/system/pipeline-registry.ts). Verify that `process -- toast-orders`, `process -- toast`, `sync -- toast-orders` and `sync -- toast` then run in dependency order. A deleted order must remain traceable but stop contributing to sales after its new revision is processed.
+- Build the draft daily net sales report, then compare one completed day/location against Toast Sales Summary, including discounts, refunds, voids, split checks, tax and service-charge treatment. The comparison gates trust and publication, not starting the draft.
 - A future-business-date catering record was observed. It may be scheduled; inspect its semantics rather than discard it or diagnose it from the date alone.
 - Add processing-version replay and invalid-record recovery where needed; changing a version constant alone does not select already-processed Raw.
 
-Once one day reconciles, build the [first usable chart](project-plan.md#first-usable-chart-daily-food--beverage-net-sales): daily net sales at reviewed F&B locations over the latest 30 completed business days, a location filter and visible `Data through` date. Distinguish missing coverage from verified zero sales. Weekly year-over-year remains later.
+Once one day reconciles, validate and expand the [first usable chart](project-plan.md#first-usable-chart-daily-food--beverage-net-sales) to the latest 30 completed business days, with an F&B location filter and a visible `Data through` date. Distinguish missing coverage from verified zero sales. Weekly year-over-year remains later.
 
 ## 4. Deferred ingestion and operational work
 
-- Wire processing into combined sync only as an explicit, tested behavior change. `sync -- toast` currently remains Raw-only.
 - Add processing freshness only with a clear meaning; `last_successful_processing_at` is not currently advanced.
 - Verify connected checkpoint/fresh-process restart behavior with the isolated [synthetic restart check](../sandbox/check-ingestion-restart.ts), without advancing real Toast progress. Full historical coverage and older-range replay for newly visible locations remain separate work.
 - Retain Toast pacing. Measure before optimizing and verify historical spacing requirements before adding concurrency.
-- Add `node-cron` and a supervised Render worker after standalone behavior is verified. Do not allow overlapping independent writers under the process-local guard.
+- Add `node-cron` and a supervised Render worker after full manual sync is verified. Call the shared source-sync dispatcher directly, with deliberate target checks, non-overlapping ticks per source and bounded concurrency across independent sources. Do not run separate terminal writers alongside the worker.
 - Prove broader reuse with a second real source before generalizing. Preserve existing identities, progress and applied migrations.

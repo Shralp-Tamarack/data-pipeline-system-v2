@@ -1,12 +1,12 @@
 import {z} from "zod";
 import type {Logger} from "pino";
-import {and, eq, inArray, or, sql} from "drizzle-orm";
+import {and, eq, inArray, sql} from "drizzle-orm";
 import {env_vars} from "../system/system-configuration.ts";
 import {warehouse_db} from "../system/pgsql-warehouse.ts";
 import {request_toast_authorized_json} from "./toast-authentication.ts";
 import {Toast_Request_Error} from "./toast-request.ts";
-import {execute_pipeline} from "../system/pipeline-orchestrator.ts";
-import type {Pipeline_Execution_Result} from "../system/pipeline-types.ts";
+import {execute_tracked_pipeline_operation} from "../system/pipeline-operation.ts";
+import type {Pipeline_Operation_Result} from "../system/pipeline-types.ts";
 import {load_raw_records} from "../system/raw-pipeline-loader.ts";
 import {
   Raw_Toast_Locations,
@@ -14,14 +14,15 @@ import {
   toast_source_system_name,
   Processed_Locations
 } from "./toast-schema.ts";
-import {Pipeline_Execution_History, Pipeline_Progress} from "../system/system-schema.ts";
-import { execute_processing } from "../system/processing-executer.ts";
+import {process_pending_raw_records} from "../system/processing.ts";
+import type {Processing_Transaction} from "../system/processing-types.ts";
 import {toast_location_type_map} from "./toast-location-type-map.ts";
 
 const toast_location_schema = z.object({
   restaurantGuid : z.string().refine(
     restaurant_guid => restaurant_guid.trim().length > 0
-  )
+  ),
+  deleted : z.boolean()
 }).passthrough();
 
 type Toast_Location_Record = z.infer<typeof toast_location_schema>;
@@ -55,10 +56,10 @@ export async function get_toast_locations(signal? : AbortSignal, logger? : Logge
 }
 
 /** Refreshes Raw locations as a snapshot without advancing a time-window watermark. */
-export async function ingest_toast_locations(signal : AbortSignal): Promise<Pipeline_Execution_Result> {
+export async function ingest_toast_locations(signal : AbortSignal): Promise<Pipeline_Operation_Result> {
   signal.throwIfAborted();
 
-  return execute_pipeline(toast_locations_pipeline_name, "ingestion", async (execution_id, pipeline_logger) => {
+  return execute_tracked_pipeline_operation(toast_locations_pipeline_name, "ingestion", async (execution_id, pipeline_logger) => {
     const locations = await get_toast_locations(signal, pipeline_logger);
     const location_guids = locations.map(location => location.restaurantGuid);
 
@@ -96,7 +97,8 @@ export async function ingest_toast_locations(signal : AbortSignal): Promise<Pipe
 
       const records = location_batch.map(location => ({
         source_record_id : location.restaurantGuid,
-        content : location
+        content : location,
+        deleted : location.deleted
       }));
       records_changed += await load_raw_records(Raw_Toast_Locations, execution_id, records);
     }
@@ -163,104 +165,40 @@ export function map_toast_location(
 
 const location_processing_version = 1;
 
-// Commit output, Raw revision markers and the count together; Raw locks prevent newer revisions being marked done.
-async function process_toast_location_batch(execution_id : string) : Promise<number> {
-  return warehouse_db.transaction(async transaction => {
-    // Match ingestion's history/progress-before-Raw lock order.
-    const [execution_record] = await transaction
-      .select({pipeline_name : Pipeline_Progress.pipeline_name})
-      .from(Pipeline_Execution_History)
-      .innerJoin(
-        Pipeline_Progress,
-        eq(Pipeline_Execution_History.pipeline_progress_id, Pipeline_Progress.id)
-      )
-      .where(and(
-        eq(Pipeline_Execution_History.id, execution_id),
-        eq(Pipeline_Execution_History.operation, "processing"),
-        eq(Pipeline_Execution_History.status, "running")
-      ))
-      .for("update");
+async function write_processed_locations(
+  transaction : Processing_Transaction,
+  raw_locations : Raw_Toast_Location[],
+  execution_id : string
+): Promise<void> {
+  const processed_locations = raw_locations.map(raw_location => ({
+    ...map_toast_location(raw_location),
+    processing_version : location_processing_version,
+    execution_id : execution_id
+  }));
 
-    if (!execution_record || execution_record.pipeline_name !== toast_locations_pipeline_name) {
-      throw new Error("Location processing requires a running processing execution for this pipeline.");
-    }
-
-    const raw_locations = await transaction
-      .select()
-      .from(Raw_Toast_Locations)
-      .where(and(
-        eq(Raw_Toast_Locations.record_source, toast_locations_pipeline_name),
-        eq(Raw_Toast_Locations.processed, false)
-      ))
-      .orderBy(Raw_Toast_Locations.id)
-      .limit(100)
-      .for("update");
-
-    if (raw_locations.length === 0) {
-      return 0;
-    }
-
-    const processed_locations = raw_locations.map(raw_location => ({
-      ...map_toast_location(raw_location),
-      processing_version : location_processing_version,
-      execution_id : execution_id
-    }));
-
-    await transaction
-      .insert(Processed_Locations)
-      .values(processed_locations)
-      .onConflictDoUpdate({
-        target : [Processed_Locations.source_system, Processed_Locations.source_record_id],
-        set : {
-          name : sql`excluded.name`,
-          deleted : sql`excluded.deleted`,
-          raw_content_revision : sql`excluded.raw_content_revision`,
-          processing_version : sql`excluded.processing_version`,
-          execution_id : sql`excluded.execution_id`,
-          updated_at : sql`now()`
-        }
-      });
-
-    const processed_batch_records = await transaction
-      .update(Raw_Toast_Locations)
-      .set({processed : true})
-      .where(or(...raw_locations.map(raw_location => and(
-        eq(Raw_Toast_Locations.id, raw_location.id),
-        eq(Raw_Toast_Locations.content_revision, raw_location.content_revision)
-      ))))
-      .returning({id : Raw_Toast_Locations.id});
-
-    if (processed_batch_records.length !== raw_locations.length) {
-      throw new Error("Not every Raw location in the batch was marked as processed.");
-    }
-
-    const [execution] = await transaction
-      .update(Pipeline_Execution_History)
-      .set({
-        records_processed : sql`${Pipeline_Execution_History.records_processed} + ${processed_batch_records.length}`
-      })
-      .where(and(
-        eq(Pipeline_Execution_History.id, execution_id),
-        eq(Pipeline_Execution_History.operation, "processing"),
-        eq(Pipeline_Execution_History.status, "running")
-      ))
-      .returning({id : Pipeline_Execution_History.id});
-
-    if (!execution) {
-      throw new Error("Location processing requires a running processing execution.");
-    }
-
-    return processed_batch_records.length;
-  });
+  await transaction
+    .insert(Processed_Locations)
+    .values(processed_locations)
+    .onConflictDoUpdate({
+      target : [Processed_Locations.source_system, Processed_Locations.source_record_id],
+      set : {
+        name : sql`excluded.name`,
+        deleted : sql`excluded.deleted`,
+        raw_content_revision : sql`excluded.raw_content_revision`,
+        processing_version : sql`excluded.processing_version`,
+        execution_id : sql`excluded.execution_id`,
+        updated_at : sql`now()`
+      }
+    });
 }
 
 export async function process_toast_locations(
   signal : AbortSignal
-) : Promise<Pipeline_Execution_Result> {
-  return execute_processing({
-    pipeline_name : toast_locations_pipeline_name,
+) : Promise<Pipeline_Operation_Result> {
+  return process_pending_raw_records({
+    raw_table : Raw_Toast_Locations,
     signal : signal,
-    process_batch : process_toast_location_batch,
+    write_processed_records : write_processed_locations,
     finalize_processing : async pipeline_logger => {
       signal.throwIfAborted();
 

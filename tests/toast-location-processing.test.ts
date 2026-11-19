@@ -45,7 +45,7 @@ test("Toast location processing with synthetic transactional persistence", async
     mkdirSync(toast_directory, {recursive : true});
     writeFileSync(join(directory, "package.json"), '{"type":"module"}');
     symlinkSync(resolve(import.meta.dirname, "..", "node_modules"), join(directory, "node_modules"), "junction");
-    for (const filename of ["system-schema.ts", "pipeline-orchestrator.ts", "processing-executer.ts"]) {
+    for (const filename of ["system-schema.ts", "pipeline-operation.ts", "processing.ts"]) {
       copyFileSync(resolve(import.meta.dirname, "..", "core", "system", filename), join(system_directory, filename));
     }
     for (const filename of ["toast-schema.ts", "toast-locations.ts"]) {
@@ -207,6 +207,10 @@ export const warehouse_db = {
 `);
     const {process_toast_locations} : typeof import("../core/toast/toast-locations.ts") =
       await import(pathToFileURL(join(toast_directory, "toast-locations.ts")).href);
+    const {process_pending_raw_records} : typeof import("../core/system/processing.ts") =
+      await import(pathToFileURL(join(system_directory, "processing.ts")).href);
+    const {Raw_Toast_Locations} : typeof import("../core/toast/toast-schema.ts") =
+      await import(pathToFileURL(join(toast_directory, "toast-schema.ts")).href);
     const {state} : {state : Processing_State} =
       await import(pathToFileURL(join(system_directory, "pgsql-warehouse.ts")).href);
     const {toast_location_type_map} : typeof import("../core/toast/toast-location-type-map.ts") =
@@ -239,6 +243,48 @@ export const warehouse_db = {
       });
     }
     const execute_test_processing = () => process_toast_locations(new AbortController().signal);
+
+    await context.test("shared processing finalizes once on empty and releases the guard after finalization failure", async () => {
+      reset(0);
+      const settings = {
+        raw_table : Raw_Toast_Locations,
+        signal : new AbortController().signal,
+        write_processed_records : async () => assert.fail("Empty batches must not call the writer.")
+      };
+      await assert.rejects(process_pending_raw_records({
+        ...settings,
+        finalize_processing : async () => {
+          await assert.rejects(process_pending_raw_records(settings), /already running in this process/);
+          throw new Error("Synthetic finalization failure.");
+        }
+      }), /Pipeline execution .* failed/);
+      let finalizations = 0;
+      await process_pending_raw_records({
+        ...settings,
+        finalize_processing : async () => {finalizations++; }
+      });
+      assert.equal(finalizations, 1);
+      assert.deepEqual(completions, ["failed", "succeeded"]);
+    });
+
+    await context.test("cancellation prevents startup or further batches and finalization without undoing committed work", async () => {
+      reset(101);
+      const controller = new AbortController();
+      const settings = {
+        raw_table : Raw_Toast_Locations,
+        signal : controller.signal,
+        write_processed_records : async () => {controller.abort();},
+        finalize_processing : async () => assert.fail("Cancelled processing must not finalize.")
+      };
+      await assert.rejects(process_pending_raw_records(settings), /Pipeline execution .* failed/);
+      assert.equal(state.count, 100);
+      assert.equal(state.raw.filter(record => !record.processed).length, 1);
+      assert.deepEqual(state.batches, [100]);
+      const before = structuredClone(state);
+      await assert.rejects(process_pending_raw_records(settings));
+      assert.deepEqual(state, before);
+      assert.deepEqual(completions, ["failed"]);
+    });
 
     await context.test("drains 250 rows in bounded batches and a second run is a no-op", async () => {
       reset(250);

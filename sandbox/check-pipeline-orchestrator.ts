@@ -3,7 +3,7 @@ import {eq} from "drizzle-orm";
 import {env_vars} from "../core/system/system-configuration.ts";
 import {warehouse_db, warehouse_pool} from "../core/system/pgsql-warehouse.ts";
 import {Pipeline_Execution_History} from "../core/system/system-schema.ts";
-import {execute_pipeline} from "../core/system/pipeline-orchestrator.ts";
+import {execute_tracked_pipeline_operation} from "../core/system/pipeline-operation.ts";
 
 if (env_vars.system_environment !== "experimental") {
   throw new Error("Run this check only in the experimental environment.");
@@ -12,7 +12,7 @@ if (env_vars.system_environment !== "experimental") {
 const pipeline_name = "sandbox_orchestrator_check";
 
 try {
-  const {execution_id : successful_execution_id} = await execute_pipeline(
+  const {execution_id : successful_execution_id} = await execute_tracked_pipeline_operation(
     pipeline_name,
     "success-check",
     async () => ({status : "succeeded"})
@@ -30,7 +30,7 @@ try {
   let failed_execution_id : string | undefined;
 
   await assert.rejects(
-    execute_pipeline(
+    execute_tracked_pipeline_operation(
       pipeline_name,
       "failure-check",
       async execution_id => {
@@ -64,7 +64,7 @@ try {
   const held_work = new Promise<void>(resolve => {
     release_first = resolve;
   });
-  const first_execution = execute_pipeline(
+  const first_execution = execute_tracked_pipeline_operation(
     pipeline_name,
     "overlap-check",
     async () => {
@@ -75,13 +75,13 @@ try {
 
   try {
     await assert.rejects(
-      execute_pipeline(pipeline_name, "duplicate-start-check", async () => {
+      execute_tracked_pipeline_operation(pipeline_name, "duplicate-start-check", async () => {
         throw new Error("Duplicate pipeline work must never execute.");
       }),
       /already running in this process/
     );
 
-    await execute_pipeline(
+    await execute_tracked_pipeline_operation(
       "sandbox_independent_pipeline_check",
       "independent-start-check",
       async () => ({status : "succeeded"})
@@ -92,7 +92,7 @@ try {
     await first_execution;
   }
 
-  await execute_pipeline(
+  await execute_tracked_pipeline_operation(
     pipeline_name,
     "restart-after-completion-check",
     async () => ({status : "succeeded"})

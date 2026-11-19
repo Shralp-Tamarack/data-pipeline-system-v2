@@ -4,6 +4,8 @@ import {copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync} from "node:
 import {tmpdir} from "node:os";
 import {join, resolve} from "node:path";
 import {test} from "node:test";
+import {execute_pipeline_workflow} from "../core/system/pipeline-workflow.ts";
+import type {Pipeline_Stage_Handlers} from "../core/system/pipeline-workflow.ts";
 
 test("pipeline CLI routing with synthetic pipelines and no warehouse access", async context => {
   const directory = mkdtempSync(join(tmpdir(), "pipeline-cli-test-"));
@@ -14,33 +16,34 @@ test("pipeline CLI routing with synthetic pipelines and no warehouse access", as
     mkdirSync(system_directory, {recursive : true});
     mkdirSync(toast_directory, {recursive : true});
     writeFileSync(join(directory, "package.json"), '{"type":"module"}');
-    copyFileSync(
-      resolve(import.meta.dirname, "..", "core", "system", "pipeline-cli.ts"),
-      join(system_directory, "pipeline-cli.ts")
-    );
+    for (const filename of ["pipeline-cli.ts", "pipeline-registry.ts", "pipeline-workflow.ts"]) {
+      copyFileSync(resolve(import.meta.dirname, "..", "core", "system", filename), join(system_directory, filename));
+    }
     writeFileSync(join(system_directory, "system-configuration.ts"), `
 export const env_vars = {system_environment : process.env.test_environment};
 `);
     writeFileSync(join(system_directory, "pgsql-warehouse.ts"), `
 export const warehouse_pool = {async end() {console.log("POOL_CLOSED");}};
 `);
-    writeFileSync(join(system_directory, "pipeline-registry.ts"), `
-function create_pipeline(operation) {
-  return async signal => {
-    signal.throwIfAborted();
-    console.log("CALLED_" + operation);
-    if (process.env.test_outcome === "failed") throw new Error("Synthetic failure.");
-    return {execution_id : "synthetic-execution", status : process.env.test_outcome};
-  };
+    writeFileSync(join(toast_directory, "test-stage.ts"), `
+export async function execute_stage(signal, stage) {
+  signal.throwIfAborted();
+  console.log("CALLED_" + stage);
+  if (process.env.test_outcome === "failed") throw new Error("Synthetic failure.");
+  return {execution_id : "synthetic-execution", status : process.env.test_outcome};
 }
-export const ingestion_pipelines = new Map([["toast-locations", create_pipeline("INGEST")]]);
-export const processing_pipelines = new Map([["toast-locations", create_pipeline("PROCESS")]]);
+`);
+    writeFileSync(join(toast_directory, "toast-locations.ts"), `
+import {execute_stage} from "./test-stage.ts";
+export const ingest_toast_locations = signal => execute_stage(signal, "INGEST_LOCATIONS");
+export const process_toast_locations = signal => execute_stage(signal, "PROCESS_LOCATIONS");
+`);
+    writeFileSync(join(toast_directory, "toast-orders.ts"), `
+import {execute_stage} from "./test-stage.ts";
+export const ingest_toast_orders = signal => execute_stage(signal, "INGEST_ORDERS");
 `);
     writeFileSync(join(toast_directory, "toast-request.ts"), `
 export class Toast_Request_Error extends Error {}
-`);
-    writeFileSync(join(toast_directory, "toast-sync.ts"), `
-export async function execute_toast_sync() {console.log("CALLED_SYNC");}
 `);
 
     function execute_cli(
@@ -60,15 +63,31 @@ export async function execute_toast_sync() {console.log("CALLED_SYNC");}
       return result;
     }
 
-    await context.test("routes processing, ingestion and sync to only the selected handler", () => {
-      for (const [command, target, handler] of [
-        ["process", "toast-locations", "PROCESS"],
-        ["ingest", "toast-locations", "INGEST"],
-        ["sync", "toast", "SYNC"]
+    await context.test("runs individual stages, source ingestion, and location sync in order", () => {
+      for (const [command, target, handlers] of [
+        ["process", "toast-locations", ["CALLED_PROCESS_LOCATIONS"]],
+        ["ingest", "toast-orders", ["CALLED_INGEST_ORDERS"]],
+        ["ingest", "toast", ["CALLED_INGEST_LOCATIONS", "CALLED_INGEST_ORDERS"]],
+        ["sync", "toast-locations", ["CALLED_INGEST_LOCATIONS", "CALLED_PROCESS_LOCATIONS"]]
       ] as const) {
         const result = execute_cli([command, target]);
         assert.equal(result.status, 0, result.stderr);
-        assert.deepEqual(result.stdout.match(/CALLED_\w+/g), [`CALLED_${handler}`]);
+        assert.deepEqual(result.stdout.match(/CALLED_\w+/g), handlers);
+      }
+    });
+
+    await context.test("rejects unavailable processing, sync, or reconciliation before starting any stage", () => {
+      for (const [command, target, message] of [
+        ["sync", "toast", /process is not implemented for toast-orders/],
+        ["sync", "toast-orders", /process is not implemented for toast-orders/],
+        ["process", "toast", /process is not implemented for toast-orders/],
+        ["reconcile", "toast", /reconcile is not supported for toast/],
+        ["reconcile", "toast-locations", /reconcile is not supported for toast-locations/]
+      ] as const) {
+        const result = execute_cli([command, target]);
+        assert.equal(result.status, 1);
+        assert.doesNotMatch(result.stdout, /CALLED_|Completed/);
+        assert.match(result.stderr, message);
       }
     });
 
@@ -77,7 +96,7 @@ export async function execute_toast_sync() {console.log("CALLED_SYNC");}
         const result = execute_cli(["process", "toast-locations"], outcome);
         assert.equal(result.status, 1);
         assert.match(result.stdout, /CALLED_PROCESS/);
-        assert.doesNotMatch(result.stdout, /Processing completed/);
+        assert.doesNotMatch(result.stdout, /Completed process/);
         assert.match(result.stderr, outcome === "failed" ? /Execution did not complete/ : new RegExp(outcome));
       }
     });
@@ -89,12 +108,55 @@ export async function execute_toast_sync() {console.log("CALLED_SYNC");}
         const result = execute_cli(arguments_list);
         assert.equal(result.status, 1);
         assert.doesNotMatch(result.stdout, /CALLED_/);
-        assert.match(result.stderr, /Usage: npm run process/);
+        assert.match(result.stderr, /Usage: npm run <ingest\|reconcile\|process\|sync>/);
       }
       const result = execute_cli(["process", "toast-locations"], "succeeded", "operational");
       assert.equal(result.status, 1);
       assert.doesNotMatch(result.stdout, /CALLED_/);
       assert.match(result.stderr, /requires the experimental environment/);
+    });
+
+    await context.test("full source sync waits for each pipeline including configured reconciliation and stops on failure", async () => {
+      const stages : string[] = [];
+      let reconcile_status : "partial" | "succeeded" = "partial";
+      const pipelines = new Map<string, Pipeline_Stage_Handlers>([
+        ["catalog", {
+          ingest : async () => {
+            stages.push("catalog ingest");
+            return {execution_id : "catalog-ingest", status : "succeeded"};
+          },
+          reconcile : async () => {
+            stages.push("catalog reconcile");
+            return {execution_id : "catalog-reconcile", status : reconcile_status};
+          },
+          process : async () => {
+            stages.push("catalog process");
+            return {execution_id : "catalog-process", status : "succeeded"};
+          }
+        }],
+        ["orders", {
+          ingest : async () => {
+            stages.push("orders ingest");
+            return {execution_id : "orders-ingest", status : "succeeded"};
+          },
+          process : async () => {
+            stages.push("orders process");
+            return {execution_id : "orders-process", status : "succeeded"};
+          }
+        }]
+      ]);
+      const signal = new AbortController().signal;
+      await assert.rejects(execute_pipeline_workflow("sync", "source", pipelines, signal), /reconcile ended partial/);
+      assert.deepEqual(stages, ["catalog ingest", "catalog reconcile"]);
+      stages.length = 0;
+      reconcile_status = "succeeded";
+      const execution = execute_pipeline_workflow("sync", "source", pipelines, signal);
+      const orders = pipelines.get("orders");
+      assert.ok(orders);
+      await assert.rejects(execute_pipeline_workflow("ingest", "orders", new Map([["orders", orders]]), signal),
+        /orders already has an active workflow/);
+      await execution;
+      assert.deepEqual(stages, ["catalog ingest", "catalog reconcile", "catalog process", "orders ingest", "orders process"]);
     });
   } finally {
     rmSync(directory, {recursive : true, force : true});

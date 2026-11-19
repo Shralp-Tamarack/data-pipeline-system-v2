@@ -13,17 +13,18 @@ Shared execution and persistence live in `core/system/`; source knowledge is col
 | [system-schema.ts](../core/system/system-schema.ts) | Defines system metadata and reusable Raw/Processed schema builders |
 | [pipeline-progress.ts](../core/system/pipeline-progress.ts) | Registers progress and persists completed-window checkpoints |
 | [pipeline-history.ts](../core/system/pipeline-history.ts) | Records execution starts and terminal outcomes |
-| [pipeline-orchestrator.ts](../core/system/pipeline-orchestrator.ts) | Owns durable execution outcomes, per-run log context and the process-local per-pipeline busy guard |
-| [pipeline-cli.ts](../core/system/pipeline-cli.ts), [pipeline-registry.ts](../core/system/pipeline-registry.ts) | Separate ingestion/processing registries, manual `ingest`, `process` and `sync` routing, cancellation and pool cleanup |
+| [pipeline-operation.ts](../core/system/pipeline-operation.ts) | Tracks one pipeline operation: durable execution outcome, per-run log context and the process-local per-pipeline busy guard |
+| [pipeline-cli.ts](../core/system/pipeline-cli.ts) | Manual `ingest`, `reconcile`, `process` and `sync` routing, environment guard, cancellation and pool cleanup |
+| [pipeline-registry.ts](../core/system/pipeline-registry.ts), [pipeline-workflow.ts](../core/system/pipeline-workflow.ts) | Explicit pipeline stage handlers, source dependency order, workflow preflight, sequential execution and process-local overlap protection |
 | [system-logger.ts](../core/system/system-logger.ts) | Pino JSON stdout with optional compact `pino-pretty` output |
 | [ingestion-types.ts](../core/system/ingestion-types.ts) | Shared Raw record input and source ingestion configuration types |
 | [ingestion-windows.ts](../core/system/ingestion-windows.ts) | Generates consecutive source-time windows |
-| [ingestion-executer.ts](../core/system/ingestion-executer.ts) | Sequentially extracts/loads windows and checkpoints configured ingestion |
-| [processing-executer.ts](../core/system/processing-executer.ts) | Drains pending batches under one execution; invokes optional finalization before success, including with no pending rows |
+| [ingestion.ts](../core/system/ingestion.ts) | Sequentially extracts/loads windows and checkpoints configured ingestion |
+| [processing.ts](../core/system/processing.ts) | Selects and locks pending Raw batches; commits pipeline writer output, exact revision acknowledgments and history counts together, then finalizes |
+| [processing-types.ts](../core/system/processing-types.ts) | Shared types for a Raw processing record and the transaction passed to each writer |
 | [raw-pipeline-loader.ts](../core/system/raw-pipeline-loader.ts) | Bounded Raw upserts and a separate confirmed-deletion helper, each transactional with history counts |
 | [toast-configuration.ts](../core/toast/toast-configuration.ts) | Toast start date, orders window size and page size |
 | [toast-schema.ts](../core/toast/toast-schema.ts) | Raw orders and locations, and `processed.locations` |
-| [toast-sync.ts](../core/toast/toast-sync.ts) | Runs Raw locations before Raw orders; no processing or scheduling yet |
 | [toast-orders.ts](../core/toast/toast-orders.ts) | Business-date pilot reader, modification-time extractor and configured orders ingestion |
 | [toast-locations.ts](../core/toast/toast-locations.ts) | Discovery, Raw snapshots, revision-safe Processed writes and application of location types |
 | [toast-location-type-map.ts](../core/toast/toast-location-type-map.ts) | Reviewed GUID-to-type mapping, independent of source payloads and Raw revisions |
@@ -34,6 +35,15 @@ Shared execution and persistence live in `core/system/`; source knowledge is col
 | [system-scheduler.ts](../core/system/system-scheduler.ts) | Empty placeholder; no scheduling behavior |
 
 Reports and analytics will be organized around users' business questions and decisions, not these technical folders or source names.
+
+### The execution model in plain language
+
+- **Command routing:** `execute_pipeline_command` resolves a source or pipeline target in the registry.
+- **Workflow:** `execute_pipeline_workflow` runs the requested stage, or composes ingest, optional reconcile and process for each pipeline in order. It does not report a Raw-only refresh as a complete sync.
+- **Operation tracking:** `execute_tracked_pipeline_operation` runs one supplied operation with history, logging and process-local overlap protection. It does not choose or run the entire sync.
+- **Ingestion and processing:** `execute_ingestion` handles source windows and Raw loading; `process_pending_raw_records` drains pending Raw through the pipeline's writer.
+
+The current module names describe responsibilities; function names describe actions. Shared result types use `Pipeline_Operation_Result`. The focused naming cleanup changed no database identities, migrations, public commands, external API fields or runtime behavior. Test/sandbox filenames were retained. See [naming standards](../.github/copilot-instructions.md#name-by-meaning-and-role).
 
 ## Configuration and database boundary
 
@@ -50,7 +60,7 @@ The environment name must be `experimental` or `operational`. This is not proof 
 Configured `execute_ingestion`:
 
 1. Captures an end time once at run start.
-2. Enters the orchestrator's per-pipeline guard.
+2. Enters the operation-tracking per-pipeline guard.
 3. Reads from the saved watermark minus the configured lookback (one elapsed day by default), or uses the source's `data_start_date` when there is no watermark.
 4. Generates consecutive windows and consumes source-provided bounded batches sequentially.
 5. Commits each Raw batch before requesting more records.
@@ -94,25 +104,28 @@ Identity is `record_source` + `source_record_id`. Toast uses the exact order or 
 
 Each table has source-identity, pending-processing and execution-ID indexes; history foreign keys use `ON DELETE RESTRICT`. The loader verifies the execution's pipeline, rejects blank/duplicate identities and batches above 100 records, and:
 
-- Inserts new rows with revision 1.
-- Updates changed payloads while preserving internal/source identity and creation time.
-- Increments revision, clears `processed`, and changes execution/update metadata only for changed payloads in the ordinary upsert path.
-- Leaves unchanged payloads untouched and counts them as zero changes.
+- Inserts new rows with revision 1 and `deleted` from the optional input metadata, defaulting to `false` when omitted.
+- On conflict, explicit `true` marks deleted, explicit `false` restores, and omitted metadata preserves the existing deletion status.
+- Updates changed payloads or effective deletion status while preserving internal/source identity and creation time.
+- Increments revision, clears `processed`, and changes execution/update metadata once per changed row, even when both payload and deletion status change.
+- Leaves unchanged payloads/status untouched and counts them as zero changes.
 - Stores context on insert; omission on replay preserves it.
 - Rejects the entire transaction if supplied context conflicts, including stored SQL NULL.
 - Commits Raw changes and the history change count atomically.
 
-Row-count bounds do not replace producer byte bounds. The loader does not advance checkpoints; the executer calls the separate completed-window transaction after all batches finish. User-reported synthetic warehouse checks cover mutation, replay, context rollback and rollback after a history-count overflow. Concurrent context writes and source-version ordering remain unverified.
+Row-count bounds do not replace producer byte bounds. The loader does not advance checkpoints; shared ingestion calls the separate completed-window transaction after all batches finish. User-reported synthetic warehouse checks cover mutation, replay, context rollback and rollback after a history-count overflow. Concurrent context writes and source-version ordering remain unverified.
 
-Current Raw has no source-version guard, full revision archive, automatic deletion detection, normal-ingestion restoration or automatic NULL-context correction. Applying the existing baseline was user-reported, not independently inspected live.
+The loader uses a parameterized SQL `CASE` keyed by identities with explicitly supplied deletion metadata, so mixed batches distinguish `false` from omission. `Raw_Record_Input.deleted?` is adapter input metadata, not a new database column; Raw tables already have `deleted`. The shared loader does not inspect source-specific payload fields.
 
-### Confirmed-deletion helper: partial implementation
+Current Raw has no source-version guard, full revision archive, missing-record deletion detection or automatic NULL-context correction. Applying the existing baseline was user-reported, not independently inspected live.
+
+### Confirmed-deletion helper
 
 `mark_raw_records_deleted` accepts a Raw table, a running execution ID and at most 100 unique nonblank source IDs. It locks and verifies history/progress before updating matching, currently active rows in that pipeline. It sets `deleted = true`, increments `content_revision`, clears `processed`, and updates execution/time metadata without replacing content, context or identity. The same transaction increments history `records_loaded` by changed rows; this counter includes Raw deletion changes when this helper is used.
 
 Repeated deletion is a no-op. Unknown IDs are not inserted. An empty batch still requires a valid execution. Synthetic tests cover scope predicates, replay, batch/input validation and rollback; live PostgreSQL behavior of this helper has not been tested.
 
-`Raw_Record_Input.deleted?` exists as a type declaration only. **`load_raw_records` does not read it yet**, so supplying `true` or `false` currently has no effect on Raw deletion metadata. The helper is not called by current Toast pipelines, and there is no complete-inventory comparison or restoration path. This is not end-to-end deletion reconciliation. See [the next implementation step](../plan/next-steps.md#1-finish-deletion-aware-raw-loading).
+The helper is not called by current Toast pipelines. They use ordinary loading to apply returned flags and restore explicitly active records. No complete-inventory comparison exists. These mechanisms handle supplied status; they do not prove every source deletion reaches the warehouse.
 
 ## Toast extraction boundary
 
@@ -121,16 +134,29 @@ Repeated deletion is a no-op. Unknown IDs are not inserted. An empty batch still
 - The original business-date reader still reads page 1/page size 10 and reports `Link` presence; its date check validates format, not calendar validity.
 - Modification-time extraction supplies `startDate` and `endDate`, requests up to 100 orders per page, and enforces a 4 MiB page cap and a 20-second request timeout plus caller cancellation.
 - The extractor rejects invalid/oversized pages, within-page duplicate identities, empty continuing pages, malformed or unsafe links, changed filters and nonsequential page numbers.
-- The Raw adapter preserves the source payload and adds restaurant context.
+- Order and location response schemas require boolean `deleted`; missing, null or string values fail validation rather than defaulting to active.
+- The order Raw adapter preserves the source payload, adds restaurant context, and forwards `order.deleted` as shared input metadata. The location snapshot similarly forwards `location.deleted`.
 - Configured orders ingestion discovers restaurants once per run and finishes all of them in each window before checkpointing.
 
 Eligible transient failures have up to three attempts with bounded backoff and `Retry-After` handling. Order request starts are spaced at least five seconds apart across locations in one process. Snapshot ingestion warns about newly visible GUIDs, including its initial seed; warnings are not backfills or alerts. Pagination does not guarantee snapshot consistency. Newly accessible locations do not automatically receive earlier order history once the shared watermark has advanced.
+
+### Toast deletion contract and access limits
+
+Public documentation reviewed on November 18 and the support reply shared on November 19 establish these distinctions:
+
+- The [orders endpoint](https://doc.toasttab.com/openapi/orders/operation/ordersBulkGet/) exposes deletion fields and supports modification-time requests. In a user-shared November 18 reply, Toast Developer Support's AI agent said deletion updates `modifiedDate`, sets `deletedDate`, and makes the order eligible for that window with `deleted = true`. Retention and exceptions were not specified. Use normal change-window ingestion; do not assume recovery after an arbitrarily long outage.
+- The [partners specification](https://doc.toasttab.com/toast-api-specifications/toast-partners-api.yaml) describes location `deleted` as no longer operating or using Toast. The code stores this source flag; it is not permission-loss detection.
+- The [location-access guide](https://doc.toasttab.com/doc/devguide/apiPartnersGettingAccessibleRestaurants.html) explicitly says removing the integration makes a restaurant disappear from `/restaurants` and `/connectedRestaurants`. Missing access is not proof that the location or its historical orders were deleted.
+
+Do not automatically delete historical orders because a location closes or disappears from accessible discovery. Future reporting must distinguish business inactivity, access/coverage loss and actual transaction deletion. No access-state workflow, partner webhook or missing-ID reconciliation is implemented. A reliably delivered deletion flag does not require an additional full inventory solely for deletion detection.
 
 ## Processed, Refined and reliability limits
 
 The [Processed locations schema](../core/toast/toast-schema.ts) uses shared provenance columns and a unique `(source_system, source_record_id)` key. Its Raw foreign key currently points to `raw.toast_locations`. The Toast mapper validates and chooses `locationName` with `restaurantName` as a fallback. It records the Raw revision and maps deletion as `raw.deleted OR content.deleted`.
 
-The shared processing executer repeatedly invokes a transactional batch callback until it returns zero. Each location batch locks history/progress before up to 100 pending Raw rows in stable ID order. It commits Processed upserts, exact Raw ID/revision acknowledgments and `records_processed` together. There is no 100-record limit on the complete execution. The upsert preserves Processed identity, creation time, source ownership and `type`; failures roll back that batch, not earlier commits.
+The shared `process_pending_raw_records` function repeatedly selects pending Raw batches until none remain. It locks history/progress before up to 100 pending Raw rows in stable ID order and passes those rows, the same transaction and the execution ID to the pipeline's writer. Writer output, exact Raw ID/revision acknowledgments and `records_processed` commit together. There is no 100-record limit on the complete execution. The location writer preserves Processed identity, creation time, source ownership and `type`; failures roll back that batch, not earlier commits.
+
+The private `process_next_raw_batch` owns the batch transaction. A pipeline writer owns mapping and its target upserts, including immutable-field preservation and any related output tables. It must use the supplied `Processing_Transaction`, not open a separate transaction or write through the top-level database connection. `Processing_Transaction` is a compile-time name for Drizzle's transaction type, not a second connection. The processor counts acknowledged Raw records, not the number of Processed rows a writer produces.
 
 `processed.locations.type` uses `Location_Type`: `food_and_beverage`, `retail` or `unclassified`. Migration `0002` renames the former `business_type` column without recreating the table. The mapper leaves this business-owned field alone. The separate [location type map](../core/toast/toast-location-type-map.ts) explicitly maps 18 source GUIDs: four retail and fourteen F&B. El Pueblo is provisionally retail by user instruction; The Market is F&B. These are user-reviewed decisions, not independently verified Finance classifications. Names are comments for maintenance, not lookup keys.
 
@@ -138,6 +164,6 @@ After Raw batches drain, `apply_toast_location_types` runs as the optional final
 
 If finalization fails, committed processing batches remain saved and the execution fails. A later execution retries finalization even with zero pending Raw. No processing-version replay selector, record-error recovery mechanism, Processed order writer, Refined model or report exists. Advancing `location_processing_version` alone does not reprocess acknowledged Raw rows.
 
-The central busy guard prevents the same exact pipeline name from overlapping **within one Node process**, before history registration. Different pipelines may run independently. The guard clears in `finally`, including persistence failures. Use one worker, do not run standalone ingestion while it is active, and stop the old worker before starting its replacement. This does not coordinate different terminals/processes; database-backed whole-execution locking is deferred unless deployment requirements change.
+The workflow runner reserves all targeted pipelines for the entire command **within one Node process**. Overlapping source and pipeline commands are rejected before work; disjoint targets can run independently. The lower-level operation tracker still guards individual tracked stages. Both guards release on failure. They do not coordinate different terminals or processes; do not run a standalone writer alongside a worker. Database-backed coordination is deferred unless deployment requirements change.
 
 The CLI forwards `SIGINT` and `SIGTERM` to a shared abort signal and closes its pool on exit. Cancellation does not immediately cancel in-flight warehouse queries or undo committed batches. There is no scheduled worker, cross-process exclusion, startup abandoned-history recovery, comprehensive late-change correction or publication freshness.

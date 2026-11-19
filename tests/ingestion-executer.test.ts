@@ -5,7 +5,7 @@ import {join, resolve} from "node:path";
 import {test} from "node:test";
 import {pathToFileURL} from "node:url";
 
-type Executer_Module = typeof import("../core/system/ingestion-executer.ts");
+type Ingestion_Module = typeof import("../core/system/ingestion.ts");
 type Toast_Module = typeof import("../core/toast/toast-orders.ts");
 type Locations_Module = typeof import("../core/toast/toast-locations.ts");
 type Schema_Module = typeof import("../core/toast/toast-schema.ts");
@@ -24,6 +24,7 @@ type Test_State = {
   known_locations : string[];
   fail_catalog_read : boolean;
   location_name : string;
+  location_deleted : unknown;
 };
 
 test("one ingestion flow with synthetic persistence and source adapters", async context => {
@@ -35,10 +36,10 @@ test("one ingestion flow with synthetic persistence and source adapters", async 
     mkdirSync(toast_directory, {recursive : true});
     writeFileSync(join(directory, "package.json"), '{"type":"module"}');
     symlinkSync(resolve(import.meta.dirname, "..", "node_modules"), join(directory, "node_modules"), "junction");
-    for (const filename of ["ingestion-executer.ts", "ingestion-windows.ts", "processing-executer.ts", "pipeline-orchestrator.ts", "system-schema.ts"]) {
+    for (const filename of ["ingestion.ts", "ingestion-windows.ts", "processing.ts", "pipeline-operation.ts", "pipeline-registry.ts", "pipeline-workflow.ts", "system-schema.ts"]) {
       copyFileSync(resolve(import.meta.dirname, "..", "core", "system", filename), join(system_directory, filename));
     }
-    for (const filename of ["toast-orders.ts", "toast-locations.ts", "toast-location-type-map.ts", "toast-sync.ts", "toast-order-pagination.ts", "toast-request.ts", "toast-response.ts", "toast-schema.ts"]) {
+    for (const filename of ["toast-orders.ts", "toast-locations.ts", "toast-location-type-map.ts", "toast-order-pagination.ts", "toast-request.ts", "toast-response.ts", "toast-schema.ts"]) {
       copyFileSync(resolve(import.meta.dirname, "..", "core", "toast", filename), join(toast_directory, filename));
     }
     writeFileSync(join(toast_directory, "toast-configuration.ts"), `
@@ -54,7 +55,8 @@ export const state = {
   fail_load : false, fail_checkpoint : false, discoveries : 0,
   restaurants : ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"],
   visits : [], fail_restaurant : null, fail_start_at : null, batches : [],
-  known_locations : [], fail_catalog_read : false, location_name : "Synthetic location"
+  known_locations : [], fail_catalog_read : false, location_name : "Synthetic location",
+  location_deleted : false
 };
 `);
     writeFileSync(join(system_directory, "pipeline-history.ts"), `
@@ -123,7 +125,9 @@ export async function request_toast_authorized_json(url, options) {
   if (url.pathname === "/partners/v1/restaurants") {
     state.discoveries++;
     return {
-      data : state.restaurants.map(restaurantGuid => ({restaurantGuid, locationName : state.location_name})),
+      data : state.restaurants.map(restaurantGuid => ({
+        restaurantGuid, locationName : state.location_name, deleted : state.location_deleted
+      })),
       headers : new Headers()
     };
   }
@@ -137,17 +141,17 @@ export async function request_toast_authorized_json(url, options) {
       (!state.fail_start_at || window.start_at.toISOString() === state.fail_start_at)) {
     throw new Error("Synthetic restaurant failure.");
   }
-  return {data : [{guid : restaurant_guid}], headers : new Headers()};
+  return {data : [{guid : restaurant_guid, deleted : false}], headers : new Headers()};
 }
 `);
-    const {execute_ingestion} : Executer_Module = await import(pathToFileURL(join(system_directory, "ingestion-executer.ts")).href);
+    const {execute_ingestion} : Ingestion_Module = await import(pathToFileURL(join(system_directory, "ingestion.ts")).href);
     const {log_entries} : {log_entries : Array<{event : string} & Record<string, unknown>>} =
       await import(pathToFileURL(join(system_directory, "system-logger.ts")).href);
     const {ingest_toast_orders} : Toast_Module = await import(pathToFileURL(join(toast_directory, "toast-orders.ts")).href);
     const {ingest_toast_locations, map_toast_location} : Locations_Module =
       await import(pathToFileURL(join(toast_directory, "toast-locations.ts")).href);
-    const {execute_toast_sync} : typeof import("../core/toast/toast-sync.ts") =
-      await import(pathToFileURL(join(toast_directory, "toast-sync.ts")).href);
+    const {execute_pipeline_command} : typeof import("../core/system/pipeline-registry.ts") =
+      await import(pathToFileURL(join(system_directory, "pipeline-registry.ts")).href);
     const {Raw_Toast_Orders} : Schema_Module = await import(pathToFileURL(join(toast_directory, "toast-schema.ts")).href);
     const {state} : {state : Test_State} = await import(pathToFileURL(join(directory, "test-state.ts")).href);
     const {toast_configuration} : typeof import("../core/toast/toast-configuration.ts") =
@@ -186,6 +190,7 @@ export async function request_toast_authorized_json(url, options) {
       state.known_locations = [];
       state.fail_catalog_read = false;
       state.location_name = "Synthetic location";
+      state.location_deleted = false;
     };
     const raw_location = {
       id : "33333333-3333-4333-8333-333333333333",
@@ -228,9 +233,9 @@ export async function request_toast_authorized_json(url, options) {
       }), /invalid deleted flag/);
     });
 
-    await context.test("Toast sync finishes locations before starting orders", async () => {
+    await context.test("source ingestion finishes locations before starting orders", async () => {
       reset();
-      await execute_toast_sync(signal);
+      await execute_pipeline_command("ingest", "toast", signal);
 
       const locations_completed_at = log_entries.findIndex(entry =>
         entry.event === "pipeline_completed" &&
@@ -245,11 +250,11 @@ export async function request_toast_authorized_json(url, options) {
       assert.ok(state.visits.length > 0);
     });
 
-    await context.test("Toast sync skips orders when the locations refresh fails", async () => {
+    await context.test("source ingestion skips orders when the locations refresh fails", async () => {
       reset();
       state.fail_catalog_read = true;
 
-      await assert.rejects(execute_toast_sync(signal), /Pipeline execution .* failed/);
+      await assert.rejects(execute_pipeline_command("ingest", "toast", signal), /Pipeline execution .* failed/);
 
       assert.equal(state.visits.length, 0);
       assert.equal(log_entries.some(entry =>
@@ -257,11 +262,11 @@ export async function request_toast_authorized_json(url, options) {
       ), false);
     });
 
-    await context.test("Toast sync rejects on orders failure without undoing locations", async () => {
+    await context.test("source ingestion rejects on orders failure without undoing locations", async () => {
       reset();
       state.fail_restaurant = state.restaurants[0] ?? null;
 
-      await assert.rejects(execute_toast_sync(signal), /Pipeline execution .* failed/);
+      await assert.rejects(execute_pipeline_command("ingest", "toast", signal), /Pipeline execution .* failed/);
 
       assert.deepEqual(state.known_locations, state.restaurants);
       assert.ok(log_entries.some(entry =>
@@ -631,21 +636,25 @@ export async function request_toast_authorized_json(url, options) {
       ]);
     });
     await context.test("location snapshots preserve payloads in bounded batches without changing coverage", async () => {
-      reset();
-      state.restaurants = Array.from({length : 101}, (_, index) =>
-        `${String(index).padStart(8, "0")}-1111-4111-8111-111111111111`
-      );
-      const watermark = new Date("2026-01-03T00:00:00.000Z");
-      state.watermark = watermark;
-      await ingest_toast_locations(signal);
-      assert.equal(state.discoveries, 1);
-      assert.deepEqual(state.batches.map(batch => batch.length), [100, 1]);
-      assert.deepEqual(state.batches[0]?.[0], {
-        source_record_id : state.restaurants[0],
-        content : {restaurantGuid : state.restaurants[0], locationName : "Synthetic location"}
-      });
-      assert.equal(state.watermark, watermark);
-      assert.equal(state.checkpoints.length, 0);
+      for (const deleted of [false, true]) {
+        reset();
+        state.location_deleted = deleted;
+        state.restaurants = Array.from({length : 101}, (_, index) =>
+          `${String(index).padStart(8, "0")}-1111-4111-8111-111111111111`
+        );
+        const watermark = new Date("2026-01-03T00:00:00.000Z");
+        state.watermark = watermark;
+        await ingest_toast_locations(signal);
+        assert.equal(state.discoveries, 1);
+        assert.deepEqual(state.batches.map(batch => batch.length), [100, 1]);
+        assert.deepEqual(state.batches[0]?.[0], {
+          source_record_id : state.restaurants[0],
+          content : {restaurantGuid : state.restaurants[0], locationName : "Synthetic location", deleted},
+          deleted : deleted
+        });
+        assert.equal(state.watermark, watermark);
+        assert.equal(state.checkpoints.length, 0);
+      }
     });
     await context.test("invalid location snapshots fail before any Raw writes", async () => {
       const guid = "11111111-1111-4111-8111-111111111111";
@@ -653,6 +662,12 @@ export async function request_toast_authorized_json(url, options) {
         reset();
         state.restaurants = locations;
         await assert.rejects(ingest_toast_locations(signal));
+        assert.equal(state.batches.length, 0);
+      }
+      for (const deleted of [undefined, null, "false"]) {
+        reset();
+        state.location_deleted = deleted;
+        await assert.rejects(ingest_toast_locations(signal), /Pipeline execution .* failed/);
         assert.equal(state.batches.length, 0);
       }
     });

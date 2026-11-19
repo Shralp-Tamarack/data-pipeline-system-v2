@@ -4,29 +4,29 @@ import {
 } from "./pipeline-history.ts";
 import type {Logger} from "pino";
 import { system_logger } from "./system-logger.ts";
-import type {Pipeline_Execution_Result} from "./pipeline-types.ts";
+import type {Pipeline_Operation_Result} from "./pipeline-types.ts";
 
-type Pipeline_Work_Outcome = {
-  status : Pipeline_Execution_Result["status"];
+type Pipeline_Operation_Outcome = {
+  status : Pipeline_Operation_Result["status"];
   error_summary? : string;
 };
 
-const active_pipelines = new Set<string>();
+const active_operation_pipelines = new Set<string>();
 
-/** Returns the execution ID and saved outcome; rejects on work or history failures. */
-export async function execute_pipeline(
+/** Tracks one pipeline operation, including history, logging and process-local overlap protection. */
+export async function execute_tracked_pipeline_operation(
   pipeline_name : string,
   operation : string,
-  perform_pipeline_work : (
+  perform_operation : (
     execution_id : string,
     pipeline_logger : Logger
-  ) => Promise<Pipeline_Work_Outcome>
-): Promise<Pipeline_Execution_Result> {
-  if (active_pipelines.has(pipeline_name)) {
+  ) => Promise<Pipeline_Operation_Outcome>
+): Promise<Pipeline_Operation_Result> {
+  if (active_operation_pipelines.has(pipeline_name)) {
     throw new Error("This pipeline is already running in this process.");
   }
 
-  active_pipelines.add(pipeline_name);
+  active_operation_pipelines.add(pipeline_name);
 
   try {
     let execution_id : string;
@@ -58,10 +58,10 @@ export async function execute_pipeline(
       event : "pipeline_started"
     }, "Pipeline execution started");
 
-    let outcome : Pipeline_Work_Outcome;
+    let outcome : Pipeline_Operation_Outcome;
 
     try {
-      outcome = await perform_pipeline_work(execution_id, pipeline_logger);
+      outcome = await perform_operation(execution_id, pipeline_logger);
     } catch (error) {
 
       pipeline_logger.error({
@@ -112,6 +112,6 @@ export async function execute_pipeline(
 
     return {execution_id : execution_id, status : outcome.status};
   } finally {
-    active_pipelines.delete(pipeline_name);
+    active_operation_pipelines.delete(pipeline_name);
   }
 }

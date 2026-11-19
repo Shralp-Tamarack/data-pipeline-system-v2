@@ -13,6 +13,7 @@
     "gen-exe-drizzle-ddl": "npm run gen-drizzle-ddl && npm run exe-drizzle-ddl",
     "reset-db": "node scripts/reset-database.ts",
     "ingest": "node core/system/pipeline-cli.ts ingest",
+    "reconcile": "node core/system/pipeline-cli.ts reconcile",
     "sync": "node core/system/pipeline-cli.ts sync",
     "process": "node core/system/pipeline-cli.ts process"
   },

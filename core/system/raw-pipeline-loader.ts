@@ -30,6 +30,18 @@ export async function load_raw_records(
 
   const pipeline_name = getTableName(raw_table);
 
+  const source_ids_with_deletion_status = records
+    .filter(record => record.deleted !== undefined)
+    .map(record => record.source_record_id);
+
+  const next_deleted = sql`
+    CASE
+      WHEN ${inArray(raw_table.source_record_id, source_ids_with_deletion_status)}
+      THEN excluded.deleted
+      ELSE ${raw_table.deleted}
+    END
+  `;
+
   return warehouse_db.transaction(async transaction => {
     const [execution_record] = await transaction
       .select({pipeline_name : Pipeline_Progress.pipeline_name})
@@ -57,6 +69,7 @@ export async function load_raw_records(
         source_record_id : record.source_record_id,
         source_context : record.source_context,
         content : record.content,
+        deleted : record.deleted ?? false,
         record_source : pipeline_name,
         execution_id : execution_id
       })))
@@ -64,14 +77,20 @@ export async function load_raw_records(
         target : [raw_table.record_source, raw_table.source_record_id],
         set : {
           content : sql`excluded.content`,
+          deleted : next_deleted,
           execution_id : sql`excluded.execution_id`,
           content_revision : sql`${raw_table.content_revision} + 1`,
           processed : false,
           updated_at : sql`now()`
         },
-        setWhere : sql`${raw_table.content} IS DISTINCT FROM excluded.content
-          AND (excluded.source_context IS NULL
+        setWhere : and(
+          or(
+            sql`${raw_table.content} IS DISTINCT FROM excluded.content`,
+            sql`${raw_table.deleted} IS DISTINCT FROM ${next_deleted}`
+          ),
+          sql`(excluded.source_context IS NULL
             OR ${raw_table.source_context} IS NOT DISTINCT FROM excluded.source_context)`
+        )
       })
       .returning({id : raw_table.id});
 

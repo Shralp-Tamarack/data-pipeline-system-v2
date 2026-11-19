@@ -4,13 +4,13 @@ A Node.js and TypeScript system for bringing Tamarack's source data into a Neon 
 
 ## Current usable scope
 
-Toast locations can be refreshed as a Raw snapshot, and Toast orders can be loaded into Raw in bounded modification-time windows. The manual `npm run sync -- toast` command refreshes locations first, then ingests orders. Each pipeline can also be run on its own. These commands contact Toast and write to the experimental warehouse; see [command effects](documentation/setup-and-commands.md#commands-and-their-effects) before running them.
+Toast locations can be refreshed as a Raw snapshot, and Toast orders can be loaded into Raw in bounded modification-time windows. Use `npm run ingest -- toast` to ingest both, locations first. `npm run sync -- toast-locations` ingests and processes locations. Full `sync -- toast` is unavailable until orders processing is registered; it does not fall back to Raw-only ingestion. See [command effects](documentation/setup-and-commands.md#commands-and-their-effects) before running connected commands.
 
 Toast orders use **one flow for initial history and ongoing updates**: start at June 1, 2026, midnight UTC if no watermark exists, otherwise reread from one day before the saved watermark. Toast uses windows of up to 28 days; the shared fallback for other callers is seven days. The watermark advances only after all locations in a window finish.
 
 `npm run process -- toast-locations` processes all pending Raw locations in bounded transactions, then applies the reviewed location-type mapping even when no Raw work is pending. It writes the warehouse but does not contact Toast or advance the ingestion watermark. The user reported successful processing, repeat execution without duplicates, and application of the location types on the experimental target.
 
-Deletion handling is only partially built: a shared helper can mark confirmed Raw identities deleted and pending processing, but normal ingestion does not yet consume deletion metadata or restore reappearing records. No source automatically invokes deletion reconciliation. There are no Processed orders, Refined reports or scheduled worker. The existing per-pipeline overlap guard works within one Node process only.
+Raw loading handles explicit deletion and restoration flags. Toast Developer Support confirms that order deletions update `modifiedDate` and can be returned with `deleted = true` by modification-time ingestion; retention is unspecified. No separate Toast reconciler is registered, and loss of location access is not proof of deletion. There are no Processed orders, Refined reports or scheduled worker. Workflow overlap protection is process-local.
 
 ## Safe getting started
 
@@ -41,4 +41,4 @@ Deletion handling is only partially built: a shared helper can mark confirmed Ra
 - [Next steps](plan/next-steps.md): where to resume and the next acceptance checks.
 - [Project plan](plan/project-plan.md): future delivery, business requirements and open decisions.
 
-**Next session:** finish [deletion-aware Raw loading](plan/next-steps.md#1-finish-deletion-aware-raw-loading). The optional input field exists, but its loader changes have not been made. Start with offline code/tests, not new source calls, a backfill or a database mutation.
+**Resume here:** [tomorrow's first steps](plan/next-steps.md#start-here-tomorrow). Inspect the existing Raw order/check structure, build an orders writer using shared processing, and register it to enable full Toast sync. Build the report as a draft, then compare one completed day against Toast.

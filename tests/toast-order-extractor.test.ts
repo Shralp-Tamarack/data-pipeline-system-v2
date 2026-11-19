@@ -64,9 +64,9 @@ export const warehouse_db = {
 };
 `);
     for (const [filename, export_name] of [
-      ["ingestion-executer.ts", "execute_ingestion"],
-      ["processing-executer.ts", "execute_processing"],
-      ["pipeline-orchestrator.ts", "execute_pipeline"],
+      ["ingestion.ts", "execute_ingestion"],
+      ["processing.ts", "process_pending_raw_records"],
+      ["pipeline-operation.ts", "execute_tracked_pipeline_operation"],
       ["raw-pipeline-loader.ts", "load_raw_records"]
     ] as const) {
       writeFileSync(join(system_directory, filename), `
@@ -153,7 +153,7 @@ export function ${export_name}() {
     });
 
     await context.test("fetches lazily, reuses one token and preserves window filters and records", async () => {
-      const first_record = {guid : "synthetic-order-1", nested : {source_field : "unchanged"}};
+      const first_record = {guid : "synthetic-order-1", deleted : false, nested : {source_field : "unchanged"}};
       handle_orders = url => {
         assert.equal(url.searchParams.get("startDate"), window.start_at.toISOString());
         assert.equal(url.searchParams.get("endDate"), window.end_at.toISOString());
@@ -167,7 +167,7 @@ export function ${export_name}() {
           });
         }
         assert.equal(url.searchParams.get("page"), "2");
-        return Response.json([{guid : "synthetic-order-2"}]);
+        return Response.json([{guid : "synthetic-order-2", deleted : false}]);
       };
 
       const pages = extract_toast_order_window(restaurant_guid, window, new AbortController().signal);
@@ -176,14 +176,14 @@ export function ${export_name}() {
       assert.deepEqual(first_page.value, [first_record]);
       assert.equal(order_count, 1);
       const second_page = await pages.next();
-      assert.deepEqual(second_page.value, [{guid : "synthetic-order-2"}]);
+      assert.deepEqual(second_page.value, [{guid : "synthetic-order-2", deleted : false}]);
       assert.equal((await pages.next()).done, true);
       assert.equal(login_count, 1);
       assert.equal(order_count, 2);
     });
 
     await context.test("reads a full 100-order page and follows the next page", async () => {
-      const full_page = Array.from({length : 100}, (_, index) => ({guid : `order-${index}`}));
+      const full_page = Array.from({length : 100}, (_, index) => ({guid : `order-${index}`, deleted : false}));
       handle_orders = url => {
         assert.equal(url.searchParams.get("pageSize"), "100");
         if (url.searchParams.get("page") === "1") {
@@ -192,11 +192,11 @@ export function ${export_name}() {
           return Response.json(full_page, {headers : {link : `<${next_url.href}>; rel="next"`}});
         }
         assert.equal(url.searchParams.get("page"), "2");
-        return Response.json([{guid : "order-100"}]);
+        return Response.json([{guid : "order-100", deleted : false}]);
       };
       const pages = extract_toast_order_window(restaurant_guid, window, new AbortController().signal);
       assert.deepEqual((await pages.next()).value, full_page);
-      assert.deepEqual((await pages.next()).value, [{guid : "order-100"}]);
+      assert.deepEqual((await pages.next()).value, [{guid : "order-100", deleted : false}]);
       assert.equal((await pages.next()).done, true);
     });
 
@@ -206,13 +206,13 @@ export function ${export_name}() {
       try {
         handle_orders = url => {
           assert.equal(url.searchParams.get("pageSize"), "7");
-          return Response.json(Array.from({length : 7}, (_, index) => ({guid : `order-${index}`})));
+          return Response.json(Array.from({length : 7}, (_, index) => ({guid : `order-${index}`, deleted : false})));
         };
         const pages = extract_toast_order_window(restaurant_guid, window, new AbortController().signal);
         const first_page = await pages.next();
         assert.ok(Array.isArray(first_page.value));
         assert.equal(first_page.value.length, 7);
-        handle_orders = () => Response.json(Array.from({length : 8}, (_, index) => ({guid : `order-${index}`})));
+        handle_orders = () => Response.json(Array.from({length : 8}, (_, index) => ({guid : `order-${index}`, deleted : false})));
         await assert.rejects(
           extract_toast_order_window(restaurant_guid, window, new AbortController().signal).next(),
           /invalid order page/
@@ -222,9 +222,9 @@ export function ${export_name}() {
       }
     });
 
-    await context.test("maps a full page into one loader-compatible batch with intact content", async () => {
+    await context.test("maps active and deleted orders into one loader-compatible batch with intact content", async () => {
       const orders = Array.from({length : 100}, (_, index) => ({
-        guid : `order-${index}`, nested : {source_value : index}
+        guid : `order-${index}`, deleted : index % 2 === 0, nested : {source_value : index}
       }));
       handle_orders = () => Response.json(orders);
       const batches = extract_toast_raw_order_window(restaurant_guid, window, new AbortController().signal);
@@ -232,15 +232,31 @@ export function ${export_name}() {
       assert.deepEqual(batch.value, orders.map(order => ({
         source_record_id : order.guid,
         source_context : {restaurant_guid : restaurant_guid},
-        content : order
+        content : order,
+        deleted : order.deleted
       })));
       assert.equal((await batches.next()).done, true);
+    });
+
+    await context.test("rejects missing or invalid deletion status before yielding loader input", async () => {
+      for (const record of [
+        {guid : "synthetic-order"},
+        {guid : "synthetic-order", deleted : null},
+        {guid : "synthetic-order", deleted : "false"}
+      ]) {
+        handle_orders = () => Response.json([record]);
+        await assert.rejects(
+          extract_toast_raw_order_window(restaurant_guid, window, new AbortController().signal).next(),
+          /invalid order page/
+        );
+      }
     });
 
     await context.test("rejects a 100-order response exceeding the byte limit without yielding records", async () => {
       handle_orders = () => Response.json(
         Array.from({length : 100}, (_, index) => ({
           guid : `order-${index}`,
+          deleted : false,
           content : "x".repeat(42_000)
         }))
       );
@@ -276,9 +292,9 @@ export function ${export_name}() {
           if (scenario === "unsafe") next_url.hostname = "other.example";
           const records = scenario === "empty" ? []
             : scenario === "invalid" ? [{}]
-            : scenario === "duplicate" ? [{guid : "same"}, {guid : "same"}]
-            : scenario === "oversize" ? Array.from({length : 101}, (_, index) => ({guid : `order-${index}`}))
-            : [{guid : "synthetic-order"}];
+            : scenario === "duplicate" ? [{guid : "same", deleted : false}, {guid : "same", deleted : false}]
+            : scenario === "oversize" ? Array.from({length : 101}, (_, index) => ({guid : `order-${index}`, deleted : false}))
+            : [{guid : "synthetic-order", deleted : false}];
           return Response.json(records, {headers : {link : `<${next_url.href}>; rel="next"`}});
         };
         await assert.rejects(
@@ -293,7 +309,7 @@ export function ${export_name}() {
         if (url.searchParams.get("page") === "2") return new Response(null, {status : 503});
         const next_url = new URL(url);
         next_url.searchParams.set("page", "2");
-        return Response.json([{guid : "synthetic-order"}], {
+        return Response.json([{guid : "synthetic-order", deleted : false}], {
           headers : {link : `<${next_url.href}>; rel="next"`}
         });
       };
@@ -312,18 +328,18 @@ export function ${export_name}() {
         if (page === "1") {
           const next_url = new URL(url);
           next_url.searchParams.set("page", "2");
-          return Response.json([{guid : "first-page"}], {
+          return Response.json([{guid : "first-page", deleted : false}], {
             headers : {link : `<${next_url.href}>; rel="next"`}
           });
         }
         if (requested_pages.length === 2) return new Response(null, {status : 503});
-        return Response.json([{guid : "second-page"}]);
+        return Response.json([{guid : "second-page", deleted : false}]);
       };
       const records = [];
       for await (const page of extract_toast_order_window(restaurant_guid, window, new AbortController().signal)) {
         records.push(...page);
       }
-      assert.deepEqual(records, [{guid : "first-page"}, {guid : "second-page"}]);
+      assert.deepEqual(records, [{guid : "first-page", deleted : false}, {guid : "second-page", deleted : false}]);
       assert.deepEqual(requested_pages, ["1", "2", "2"]);
     });
 
@@ -331,7 +347,7 @@ export function ${export_name}() {
       handle_orders = url => {
         const next_url = new URL(url);
         next_url.searchParams.set("page", "2");
-        return Response.json([{guid : "synthetic-order"}], {
+        return Response.json([{guid : "synthetic-order", deleted : false}], {
           headers : {link : `<${next_url.href}>; rel="next"`}
         });
       };
@@ -349,10 +365,10 @@ export function ${export_name}() {
         assert.equal(url.searchParams.get("businessDate"), "20261101");
         assert.equal(url.searchParams.has("startDate"), false);
         assert.equal(url.searchParams.get("pageSize"), "10");
-        return Response.json([{guid : "synthetic-order"}]);
+        return Response.json([{guid : "synthetic-order", deleted : false}]);
       };
       assert.deepEqual(await get_toast_order_page(restaurant_guid, "20261101"), {
-        order_records : [{guid : "synthetic-order"}],
+        order_records : [{guid : "synthetic-order", deleted : false}],
         pagination_header_present : false
       });
     });

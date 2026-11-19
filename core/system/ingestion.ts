@@ -4,8 +4,8 @@ import type {create_raw_table} from "./system-schema.ts";
 import type {Raw_Record_Input, Source_System_Configuration} from "./ingestion-types.ts";
 import type {Ingestion_Window} from "./ingestion-windows.ts";
 import {create_ingestion_windows, default_ingestion_window_days} from "./ingestion-windows.ts";
-import {execute_pipeline} from "./pipeline-orchestrator.ts";
-import type {Pipeline_Execution_Result} from "./pipeline-types.ts";
+import {execute_tracked_pipeline_operation} from "./pipeline-operation.ts";
+import type {Pipeline_Operation_Result} from "./pipeline-types.ts";
 import {load_raw_records} from "./raw-pipeline-loader.ts";
 import {
   get_or_create_pipeline_progress,
@@ -35,7 +35,7 @@ type Ingestion_Settings = {
 /** Logs ingestion under its execution ID; only configured runs advance the watermark. */
 export async function execute_ingestion(
   settings : Ingestion_Settings
-): Promise<Pipeline_Execution_Result> {
+): Promise<Pipeline_Operation_Result> {
   settings.signal.throwIfAborted();
 
   const lookback_days = settings.ingestion_lookback_days ?? 1;
@@ -52,7 +52,7 @@ export async function execute_ingestion(
   const pipeline_name = getTableName(settings.raw_table);
   const run_end_at = new Date();
 
-  return execute_pipeline(
+  return execute_tracked_pipeline_operation(
     pipeline_name,
     settings.operation,
     async (execution_id, pipeline_logger) => {
@@ -116,13 +116,13 @@ export async function execute_ingestion(
         )) {
           settings.signal.throwIfAborted();
 
-          const changed = await load_raw_records(
+          const changed_record_count = await load_raw_records(
             settings.raw_table,
             execution_id,
             records
           );
           records_read += records.length;
-          records_changed += changed;
+          records_changed += changed_record_count;
 
           settings.signal.throwIfAborted();
         }

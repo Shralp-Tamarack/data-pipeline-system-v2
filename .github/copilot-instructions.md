@@ -62,6 +62,17 @@ Object-scoped properties may rely on their object as the primary phrase, such as
 
 These rules apply only to names you create; follow the programming language's conventions and preserve exact names from libraries, frameworks, dependencies, APIs, and imported code when required for correctness or interoperability.
 
+#### Name by Meaning and Role
+
+- **Modules and files:** describe their responsibility or subject, such as `processing.ts`, `pipeline-history.ts`, or `toast-authentication.ts`.
+- **Functions and methods:** describe the action they perform, such as `process_pending_raw_records` or `record_execution_start`. Follow section 3.4.
+- **Variables and properties:** describe the values they hold, such as `pending_records` or `execution_id`.
+- **Booleans:** name the state, condition, or capability clearly. Prefixes such as `is_`, `has_`, and `can_` are optional; use them only when they improve meaning or readability. Names such as `deleted`, `processed`, and `enabled` are valid, including for database columns. Object context can supply the subject, as in `record.deleted`; standalone names may need more context, such as `all_records_processed`.
+- **Types:** describe the concept or structure they represent, such as `Pipeline_Operation_Result` or `Processing_Settings`.
+- **Executable scripts:** describe the action performed when run, such as `reset-database.ts` or `check-warehouse.ts`.
+
+These are defaults, not rigid templates. Clarity takes priority; keep filenames descriptive enough to identify their responsibility in context. Avoid suffixes such as `manager`, `handler`, or `executer` unless they meaningfully distinguish the responsibility. Apply the existing casing rules to each kind of name. Do not rename existing code, files, or database columns solely to enforce these defaults without explicit authorization.
+
 #### Data Record Terminology
 
 - Use `record` as the preferred generic name for a single self-contained unit of data, whether received from an API, database, or file. Use `records` for a collection.
@@ -76,6 +87,7 @@ Functions and methods are verb-first actions. Use `_` to separate all words in t
 ### 3.5 File System
 
 - Projects, directories, files: use `kebab-case` (for example: `my-project-repo`)
+- Follow section 3.3: module filenames describe a responsibility or subject; executable script filenames describe an action. Preserve externally required and tooling-required filenames.
 
 ### 3.6 React Components
 
@@ -217,6 +229,18 @@ data interpretation, and technical maintenance.
 - Choose validation pragmatically. Use simple, explicit checks for small requirements; use a library such as Zod when a schema makes nested, repeated, or complex runtime validation clearer and more concise. Infer types from runtime schemas where useful instead of maintaining duplicate type definitions. Do not apply runtime schemas everywhere or duplicate checks already guaranteed by TypeScript.
 - Type annotations and assertions do not validate runtime values. Never cast missing or untrusted input into a valid type to bypass validation.
 - Keep runtime failures clear and explicit without exposing sensitive input values.
+
+### Pragmatic Testing
+
+- Keep testing proportionate to the change and its failure risks. Add a few focused tests for meaningful behavior introduced or fixed, not to increase test counts or coverage percentages.
+- Prioritize risks such as incorrect data, deletion/restoration, replay, partial writes, transaction boundaries, and recovery. Do not expand each change into an exhaustive test matrix.
+- Do not add tests solely for straightforward renames, formatting, trivial accessors, constants, or contracts already enforced by TypeScript. Run the existing relevant checks instead.
+- Test observable behavior through real application code where practical. Avoid brittle implementation-detail assertions and mocks that merely recreate the logic being tested.
+- Test setup has a maintenance cost too. Reuse existing tooling and fixtures where suitable; add dependencies, elaborate harnesses, alternate database engines, or testing abstractions only when a concrete verification need justifies their complexity. Explain that need before introducing new testing machinery.
+- Use the smallest existing check that covers the change. Run related targeted tests together; expand to broader suites when the affected scope or results justify it. Do not rerun every check automatically after every small edit.
+- Distinguish type-checking, synthetic tests, actual database integration checks, and source-report reconciliation. Do not claim mocks or another database engine prove PostgreSQL transaction, locking, or source-accounting behavior.
+- Keep ordinary tests offline and safe. Connected checks and warehouse mutations remain separately deliberate, target-verified actions under section 10; a need for integration evidence does not authorize live execution.
+- Explain the important risks the selected tests protect and report their limits. An earlier request to handle test code is not blanket justification for unnecessary tests or infrastructure.
 
 ## 8) Documentation Standards (Hierarchical)
 

@@ -7,13 +7,16 @@ import {toast_configuration} from "./toast-configuration.ts";
 import type {Ingestion_Window} from "../system/ingestion-windows.ts";
 import {get_toast_next_page_number} from "./toast-order-pagination.ts";
 import type { Raw_Record_Input } from "../system/ingestion-types.ts";
-import {execute_ingestion} from "../system/ingestion-executer.ts";
-import type {Pipeline_Execution_Result} from "../system/pipeline-types.ts";
+import {execute_ingestion} from "../system/ingestion.ts";
+import type {Pipeline_Operation_Result} from "../system/pipeline-types.ts";
 import {get_toast_locations} from "./toast-locations.ts";
 import {Raw_Toast_Orders} from "./toast-schema.ts";
 
 const toast_order_schema = z.object({
-  guid : z.string().refine(order_guid => order_guid.trim().length > 0)
+  guid : z.string().refine(
+    order_guid => order_guid.trim().length > 0
+  ),
+  deleted : z.boolean()
 }).passthrough();
 
 type Toast_Order_Record = z.infer<typeof toast_order_schema>;
@@ -179,13 +182,14 @@ export async function* extract_toast_raw_order_window(
     yield orders.map(order => ({
       source_record_id : order.guid,
       source_context : {restaurant_guid : restaurant_guid},
-      content : order
+      content : order,
+      deleted : order.deleted
     }));
   }
 }
 
 /** Ingests orders for all discovered locations, resuming the shared pipeline watermark. */
-export async function ingest_toast_orders(signal : AbortSignal): Promise<Pipeline_Execution_Result> {
+export async function ingest_toast_orders(signal : AbortSignal): Promise<Pipeline_Operation_Result> {
   let location_guids : string[] | undefined;
 
   return execute_ingestion({

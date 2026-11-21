@@ -2,8 +2,8 @@ import {and, eq, getTableName, or, sql, inArray} from "drizzle-orm";
 import {warehouse_db} from "./pgsql-warehouse.ts";
 import {
   create_raw_table,
-  Pipeline_Execution_History,
-  Pipeline_Progress
+  Pipeline_Operation_History,
+  Pipeline_State
 } from "./system-schema.ts";
 import type { Raw_Record_Input } from "./ingestion-types.ts";
 
@@ -44,18 +44,18 @@ export async function load_raw_records(
 
   return warehouse_db.transaction(async transaction => {
     const [execution_record] = await transaction
-      .select({pipeline_name : Pipeline_Progress.pipeline_name})
-      .from(Pipeline_Execution_History)
+      .select({pipeline_name : Pipeline_State.pipeline_name})
+      .from(Pipeline_Operation_History)
       .innerJoin(
-        Pipeline_Progress,
+        Pipeline_State,
         eq(
-          Pipeline_Execution_History.pipeline_progress_id,
-          Pipeline_Progress.id
+          Pipeline_Operation_History.pipeline_state_id,
+          Pipeline_State.id
         )
       )
       .where(and(
-        eq(Pipeline_Execution_History.id, execution_id),
-        eq(Pipeline_Execution_History.status, "running")
+        eq(Pipeline_Operation_History.id, execution_id),
+        eq(Pipeline_Operation_History.status, "running")
       ))
       .for("update");
 
@@ -119,11 +119,11 @@ export async function load_raw_records(
     }
 
     await transaction
-      .update(Pipeline_Execution_History)
+      .update(Pipeline_Operation_History)
       .set({
-        records_loaded : sql`${Pipeline_Execution_History.records_loaded} + ${changed_records.length}`
+        records_loaded : sql`${Pipeline_Operation_History.records_loaded} + ${changed_records.length}`
       })
-      .where(eq(Pipeline_Execution_History.id, execution_id));
+      .where(eq(Pipeline_Operation_History.id, execution_id));
 
     return changed_records.length;
   });
@@ -150,18 +150,18 @@ export async function mark_raw_records_deleted(
 
   return warehouse_db.transaction(async transaction => {
     const [execution_record] = await transaction
-      .select({pipeline_name : Pipeline_Progress.pipeline_name})
-      .from(Pipeline_Execution_History)
+      .select({pipeline_name : Pipeline_State.pipeline_name})
+      .from(Pipeline_Operation_History)
       .innerJoin(
-        Pipeline_Progress,
+        Pipeline_State,
         eq(
-          Pipeline_Execution_History.pipeline_progress_id,
-          Pipeline_Progress.id
+          Pipeline_Operation_History.pipeline_state_id,
+          Pipeline_State.id
         )
       )
       .where(and(
-        eq(Pipeline_Execution_History.id, execution_id),
-        eq(Pipeline_Execution_History.status, "running")
+        eq(Pipeline_Operation_History.id, execution_id),
+        eq(Pipeline_Operation_History.status, "running")
       ))
       .for("update");
 
@@ -186,11 +186,11 @@ export async function mark_raw_records_deleted(
       .returning({id : raw_table.id});
 
     await transaction
-      .update(Pipeline_Execution_History)
+      .update(Pipeline_Operation_History)
       .set({
-        records_loaded : sql`${Pipeline_Execution_History.records_loaded} + ${deleted_records.length}`
+        records_loaded : sql`${Pipeline_Operation_History.records_loaded} + ${deleted_records.length}`
       })
-      .where(eq(Pipeline_Execution_History.id, execution_id));
+      .where(eq(Pipeline_Operation_History.id, execution_id));
 
     return deleted_records.length;
   });

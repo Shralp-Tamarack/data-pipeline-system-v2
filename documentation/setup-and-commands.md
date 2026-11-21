@@ -24,7 +24,7 @@ Missing/blank entries or an invalid environment name fail explicitly. The curren
 
 dotenv automatically loads `.env` relative to the configuration module, without overriding process-provided values and without printing its loading banner. In source execution this resolves to the repository root, regardless of the sandbox working directory.
 
-Optional `log_format` is `json` (default) or `pretty`. Set `log_format=pretty` in the local `.env` for repeatable terminal use or in the experimental Render service's settings when deployed. A process-provided value overrides `.env`. Pretty mode shows UTC time, level, pipeline, execution ID and message, hiding extra fields. Use JSON for counts, date bounds and retry details; Render can text-search event names and execution IDs in JSON logs. Warehouse execution history is the durable record.
+Optional `log_format` is `json` (default) or `pretty`. Set `log_format=pretty` in the local `.env` for repeatable terminal use or in the experimental Render service's settings when deployed. A process-provided value overrides `.env`. Pretty mode shows UTC time, level, pipeline, operation, execution ID and message, hiding extra fields. Lifecycle messages say "Pipeline operation started/completed/failed"; the execution ID identifies that particular attempt. Use JSON for counts, date bounds and retry details; Render can text-search event names and execution IDs in JSON logs. Warehouse operation history is the durable record.
 
 The directory expression supports both ES-module execution and Drizzle Kit's CommonJS configuration loader. In compiled `dist/core/system/` execution, the same relative lookup resolves to `dist/.env`, **not** the repository-root file. Prefer injected process settings for deployment or deliberately configure the compiled environment-file location.
 
@@ -58,11 +58,13 @@ Run these from the repository root after installing the declared dependencies wi
 | `npm run ingest -- toast` | Experimental-label guard; runs location ingestion, then orders ingestion. Use this for the former Raw-only sync behavior |
 | `npm run process -- toast-locations` | Experimental-label guard; warehouse reads/writes only. Drains pending Raw locations in batches, writes Processed/Raw markers/history, then applies location types even with no pending Raw. No Toast calls or ingestion-watermark movement |
 | `npm run sync -- toast-locations` | Experimental-label guard; reads Toast and writes Raw, then processes locations in the warehouse |
-| `npm run process -- toast-orders` / `npm run process -- toast` | Unavailable: orders processing is missing. Fails before any stage runs |
-| `npm run sync -- toast-orders` / `npm run sync -- toast` | Unavailable until orders processing is registered. Fails before ingestion; does not fall back to Raw only |
+| `npm run process -- toast-orders` | Experimental-label guard; warehouse reads/writes only. Drains pending Raw orders into `processed.toast_orders`; requires locations to be processed first. No Toast calls |
+| `npm run process -- toast` | Processes locations (including type application), then orders |
+| `npm run sync -- toast-orders` / `npm run sync -- toast` | Experimental-label guard; live Toast reads and Raw writes, then processing. `toast` runs locations ingest/process, then orders ingest/process. Order ingestion can be long on a first run (5-second request pacing) |
+| `npm run script inspect-raw-content.ts <raw_table>` | Experimental-environment guard; read-only. Prints metadata and the **full, unredacted** content JSON of the most recently updated row in `raw.<raw_table>` (for example `toast_orders`). Output may contain customer/payment details; do not paste it into shared places |
 | `npm run reconcile -- toast` (or `toast-locations`, `toast-orders`) | Unsupported: no standalone Toast reconciler is registered. Fails without running a stage |
 | `npm run sandbox check-warehouse.ts` | Experimental-label guard; executes read-only `SELECT 1` |
-| `npm run sandbox check-pipeline-progress.ts` | Experimental-label guard; inserts missing synthetic pipeline progress and verifies repeated registration |
+| `npm run sandbox check-pipeline-state.ts` | Experimental-label guard; inserts missing synthetic pipeline state and verifies repeated registration |
 | `npm run sandbox check-pipeline-execution.ts` | Experimental-label guard; writes synthetic progress/history, checks lifecycle and duplicate-finish rejection |
 | `npm run sandbox check-pipeline-orchestrator.ts` | Experimental-label guard; writes synthetic success/failure history and a simulated committed count; verifies duplicate rejection, independent pipeline and restart |
 | `npm run sandbox check-toast-authentication.ts` | Experimental-label guard; live Toast login; token not printed |
@@ -79,7 +81,7 @@ Run these from the repository root after installing the declared dependencies wi
 | `npm run gen-exe-drizzle-ddl` | Existing combined script; bypasses the review pause and may attempt application even after some generator errors. Prefer separate generate, review and apply steps |
 | `npm run reset-db` | **Irreversible:** interactively drops experimental project schemas and deletes local generated migrations; see below |
 
-The sandbox npm script changes directory into `sandbox` and invokes Node, so pass a bare filename rather than a repository-root path.
+The sandbox and script npm commands change directory into `sandbox` or `scripts` and invoke Node, so pass a bare filename rather than a repository-root path.
 
 All four commands accept a pipeline or a source target. Source stage commands follow the declared dependency order; source sync completes each pipeline's ingest, optional reconciliation and processing before moving on. Explicit source reconciliation runs registered reconcilers only and fails if there are none. Each successful CLI stage prints its execution ID; a failed stage stops the remaining work without undoing completed stages. `sync` stops at Processed, not report publication. A future scheduler will call the [same dispatcher](../core/system/pipeline-registry.ts) in-process; it must enforce its own environment/target checks.
 
@@ -89,13 +91,41 @@ Follow the [Pragmatic Testing standards](../.github/copilot-instructions.md#prag
 
 After verifying the actual isolated experimental target, required migrations and absence of another writer, invoke `npm run process -- toast-locations`. The first execution processes pending Raw and applies the reviewed mapping. A second execution without input/mapping changes should process zero Raw rows and log `locations_updated = 0`. If only the mapping changes, zero Raw work can correctly accompany a positive classification count.
 
-Inspect structured JSON events `processing_batch_completed` and `location_types_applied` for counts; compact pretty output hides extra fields. Execution status/counts are in `system.pipeline_history`, joined to `system.pipeline_progress` for the pipeline name. Classification changes are not added to `records_processed`. Raw deletion/restoration changes count toward `records_loaded`, whether applied through ordinary loading or the confirmed-deletion helper. Toast adapters use ordinary loading, not the separate helper.
+Inspect structured JSON events `processing_batch_completed` and `location_types_applied` for counts; compact pretty output hides extra fields. Execution status/counts are in `system.pipeline_operation_history`, joined to `system.pipeline_state` for the pipeline name. Classification changes are not added to `records_processed`. Raw deletion/restoration changes count toward `records_loaded`, whether applied through ordinary loading or the confirmed-deletion helper. Toast adapters use ordinary loading, not the separate helper.
+
+### Inspecting operation performance
+
+After verifying the target and applying the current schema deliberately, this read-only query shows the latest 50 attempts:
+
+```sql
+SELECT
+  state.pipeline_name,
+  history.id AS execution_id,
+  history.operation,
+  history.status,
+  history.records_read,
+  history.records_loaded,
+  history.records_processed,
+  history.started_at,
+  history.finished_at,
+  ROUND(EXTRACT(EPOCH FROM (
+    COALESCE(history.finished_at, NOW()) - history.started_at
+  )), 3) AS elapsed_seconds
+FROM system.pipeline_operation_history AS history
+JOIN system.pipeline_state AS state ON state.id = history.pipeline_state_id
+ORDER BY history.started_at DESC
+LIMIT 50;
+```
+
+For running attempts, elapsed time is provisional, not a completed duration. `records_read` includes unchanged source records delivered to ingestion and is saved before Raw loading, so a failed load can have reads but no changes. It is not a distinct-record count or an HTTP-request count. NULL means unmeasured/not applicable. `last_successful_processing_at` advances with successful history completion after finalization, even with no pending Raw; it does not establish source completeness or published report freshness.
+
+### Reviewed location classifications
 
 The current reviewed map contains 18 GUIDs: four retail and fourteen F&B. On the same experimental target, this read-only check summarizes stored classifications:
 
 ```sql
 SELECT type, count(*) AS locations
-FROM processed.locations
+FROM processed.toast_locations
 WHERE source_system = 'toast'
 GROUP BY type
 ORDER BY type;
@@ -115,17 +145,21 @@ Metadata checks leave their synthetic progress/history in the selected database 
 
 ## Migrations
 
-[drizzle.config.ts](../drizzle.config.ts) discovers exported definitions in [system-schema.ts](../core/system/system-schema.ts) and [toast-schema.ts](../core/toast/toast-schema.ts), with generated output in [drizzle-generated-ddl](../drizzle-generated-ddl/).
+[drizzle.config.ts](../drizzle.config.ts) discovers exported definitions in [system-schema.ts](../core/system/system-schema.ts), [toast-schema.ts](../core/toast/toast-schema.ts) and [food-and-beverage-schema.ts](../core/refined/food-and-beverage-schema.ts), with generated output in [drizzle-generated-ddl](../drizzle-generated-ddl/).
 
-| Generated migration | Content |
-| --- | --- |
-| [0000_clever_dark_phoenix.sql](../drizzle-generated-ddl/0000_clever_dark_phoenix.sql) | Current baseline: system/progress/history, both Raw Toast tables and the Processed schema |
-| [0001_add-processed-locations.sql](../drizzle-generated-ddl/0001_add-processed-locations.sql) | Adds `processed.locations`, its constraints, foreign keys and indexes; no existing Raw table changes |
-| [0002_rename-location-type.sql](../drizzle-generated-ddl/0002_rename-location-type.sql) | Renames `business_type` to `type` and replaces its check constraint; preserves rows, values and table identity |
+| Generated migration | Content | Status |
+| --- | --- | --- |
+| [0000_dry_misty_knight.sql](../drizzle-generated-ddl/0000_dry_misty_knight.sql) | Fresh baseline after the November 20 experimental reset: system metadata, source-prefixed Raw Toast tables and Processed Toast locations/orders/checks | Implied applied by later user-reported runs; not verified by the assistant |
+| [0001_order-net-sales.sql](../drizzle-generated-ddl/0001_order-net-sales.sql) | Drops `processed.toast_checks`; adds `net_sales_amount`, `check_count` and its non-negative check to `processed.toast_orders`. The new `NOT NULL` columns have no defaults, so it requires an empty orders table | Implied applied: the user reported processing orders, which needs these columns. Not verified by the assistant |
+| [0002_abandoned_the_fury.sql](../drizzle-generated-ddl/0002_abandoned_the_fury.sql) | Creates the `refined` schema, `refined.food_and_beverage_outlets` with its unique indexes and name check, and the `refined.food_and_beverage_sales` view | Generated and reviewed offline; **not applied** |
+
+The outlet seed rows are planned as a separate custom migration (`npx drizzle-kit generate --custom --name seed-food-and-beverage-outlets`) containing reviewed `INSERT` statements for outlet names and Toast GUIDs. It has not been created yet. See [next steps](../plan/next-steps.md#start-here-monday).
 
 Drizzle builders do not create database objects during import. Export schemas, enums and concrete table definitions so Kit can discover them. Reusable functions are not substitutes for exported concrete tables.
 
-The experimental baseline was regenerated during development. Verify the database's applied migration history against the current local journal before future migrations; a matching table name alone does not establish a matching history. The user confirmed `processed.locations` exists and later reported successful processing/type application after the rename step. Its live migration records and credential isolation were not independently inspected. Preserve already-applied `0001`; the rename belongs in `0002`, not an edited baseline.
+During the source-prefix rename on November 20, the user confirmed another experimental reset and requested a fresh baseline. The current baseline replaces the prior local migration chain for that reset target; it is not a rename migration for databases containing existing data. Earlier connected results below predate that reset and are not evidence that the current schema/data is present. Later migrations were generated offline; 0001 used a temporary schema-only configuration without credentials.
+
+Verify the actual database and migration journal before application. Do not apply this fresh baseline to any database retaining the old tables/history; that target needs its own reviewed data-preserving migration path. No operational target or shared migration history is authorized for replacement.
 
 Generate, inspect and deliberately apply migrations. Preserve applied SQL and migration metadata; do not reset/recreate migrations for convenience or file moves. Live application status was not independently inspected during the documentation refresh.
 
@@ -156,7 +190,9 @@ The current code validates names and places experimental guards in sandbox check
 
 ### Local offline verification
 
-**Latest result, November 19, 2026:** `npm run type-check` and **70 affected offline tests** passed after the workflow foundation, shared processing refactor and focused naming cleanup.
+**Latest result, November 20, 2026:** `npm run type-check` passed after the order processor, registry change and Refined schema. [pipeline-cli.test.ts](../tests/pipeline-cli.test.ts) (6 tests) passed after updating it to expect `process -- toast` and `sync -- toast` to run locations before orders. Earlier the same day, 58 affected Toast tests passed after the validator/type renames. The order mapper was checked once offline against one real sample order (business date, net sales 0.00 for a voided selection, check count, timestamp parsing) plus identity-mismatch and invalid-date failures, using a temporary script that was then deleted. No automated test covers `map_toast_order` or `write_processed_orders` yet. The Refined view's SQL was generated offline and reviewed. No full-suite result is claimed.
+
+**Previous result, November 19, 2026:** `npm run type-check` and **92 affected offline tests** passed after the state/history rename, persisted source-read metrics and atomic processing-success update.
 
 The selection was:
 
@@ -165,8 +201,11 @@ The selection was:
 - [ingestion-executer.test.ts](../tests/ingestion-executer.test.ts): windows, checkpoints, replay, source discovery and Raw snapshots. The filename is retained; it exercises `ingestion.ts`.
 - [toast-location-processing.test.ts](../tests/toast-location-processing.test.ts): shared batch transactions, exact revision markers, rollback/retry, cancellation, finalization and location type preservation.
 - [toast-order-extractor.test.ts](../tests/toast-order-extractor.test.ts): bounded extraction, pagination, source flag validation and preservation.
+- [pipeline-state.test.ts](../tests/pipeline-state.test.ts): checkpoint predicates and simulated state/history rollback.
+- [pipeline-operation-history.test.ts](../tests/pipeline-operation-history.test.ts): independent read counts, completion/count preservation, processing-success timestamps and simulated rollback on state-write failure.
+- [raw-pipeline-loader.test.ts](../tests/raw-pipeline-loader.test.ts) and [raw-record-deletions.test.ts](../tests/raw-record-deletions.test.ts): Raw loading, deletion/restoration, replay and simulated transaction failures with the renamed metadata.
 
-These checks use synthetic source responses, configuration and persistence. They protect the implemented control flow and failure behavior; they do not prove actual PostgreSQL locking/concurrency, source completeness or financial correctness. No live Toast requests, Neon commands or migrations ran for these changes.
+These checks use synthetic source responses, configuration and persistence. They protect the implemented control flow and failure behavior; they do not prove actual PostgreSQL locking/concurrency, source completeness or financial correctness. No live Toast requests, Neon commands or migration applications ran for these changes.
 
 Earlier relevant evidence:
 
@@ -174,7 +213,7 @@ Earlier relevant evidence:
 - The then-current full suite passed **96 tests** on November 18, before later changes. This is not a full-suite result for the current worktree; do not add it to the latest focused count.
 - Earlier focused ingestion, retry, reset-guard and mapping checks passed during development. Connected evidence and its limits are recorded below rather than inferred from offline tests.
 
-This end-of-day refresh only inspected code and checked documentation links/content; it did not rerun application tests. New module names and imports passed the latest checks above. No schema migration was generated for the processing or naming refactors.
+The current fresh baseline was generated and checked offline using a temporary schema-only configuration without loading private environment settings. A second generation reported no schema changes; Drizzle's migration check passed. Baseline application and connected behavior remain unverified. Pretty/JSON logger output was separately checked with synthetic settings when operation labels were added.
 
 See [Toast deletion contract and access limits](architecture.md#toast-deletion-contract-and-access-limits) for the user-shared support reply and remaining retention uncertainty. The reply is source guidance, not an end-to-end live test.
 
@@ -196,7 +235,7 @@ The following successful outputs were supplied during development on November 13
 
 The 44 fetched orders and 38 Raw changes are different measures, not evidence of missing records: unchanged existing payloads contribute zero changes. They are separate reported runs, not a source snapshot/reconciliation.
 
-Later user-reported checks included configured Raw order runs with 5,819 and 67 changed records, a spot check of 107 orders across six locations for one day, inspection of 18 Raw location records, and confirmation that `processed.locations` exists. These are samples, not proof of complete coverage.
+Later user-reported checks included configured Raw order runs with 5,819 and 67 changed records, a spot check of 107 orders across six locations for one day, inspection of 18 Raw location records, and confirmation that the then-named `processed.locations` existed. These pre-reset samples are not proof of current schema presence or complete coverage.
 
 On November 18, the user reported successful standalone location processing and repeat execution without duplicates, then successful application/repeat verification of the reviewed location types after the rename step. No agent independently queried the warehouse or inspected the live migration journal, stored counts or locks. The reported success is basic connected evidence, not a PostgreSQL failure/concurrency test.
 
@@ -208,7 +247,7 @@ A user-supplied aggregate Raw query showed candidate sales dates by location, in
 - Concurrent context conflicts, source-version ordering, late-arriving changes and changes in accessible restaurant scope.
 - Actual PostgreSQL processing/deletion-helper rollback and revision/lock concurrency beyond basic user-reported location execution.
 - Live PostgreSQL verification of normal-loader deletion/restoration and end-to-end source deletion delivery, child-record disappearance and analytics handling.
-- Processed orders, financial correctness, report freshness, operational isolation enforcement and deployment readiness.
+- Processed order counts and contents on the experimental target, Refined migration application, financial correctness (no Toast report reconciliation yet), report freshness, operational isolation enforcement and deployment readiness.
 - Abandoned-running-history recovery, structured original-cause diagnostics and immediate database-query cancellation.
 
 The supplied connected output repeatedly included the tail of a PostgreSQL SSL compatibility warning. The full warning/cause has not been inspected; no SSL setting was changed or warning suppressed. Checks completed despite the warning. Investigate it separately without printing the connection string or weakening certificate verification.

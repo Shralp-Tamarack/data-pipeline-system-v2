@@ -5,8 +5,8 @@ import {and, eq, inArray} from "drizzle-orm";
 import {env_vars} from "../core/system/system-configuration.ts";
 import {warehouse_db, warehouse_pool} from "../core/system/pgsql-warehouse.ts";
 import {execute_ingestion} from "../core/system/ingestion.ts";
-import {get_or_create_pipeline_progress} from "../core/system/pipeline-progress.ts";
-import {Pipeline_Execution_History} from "../core/system/system-schema.ts";
+import {get_or_create_pipeline_state} from "../core/system/pipeline-state.ts";
+import {Pipeline_Operation_History} from "../core/system/system-schema.ts";
 import {
   Raw_Toast_Orders,
   toast_orders_pipeline_name
@@ -30,7 +30,7 @@ const start_at = new Date("2026-11-11T00:00:00.000Z");
 const end_at = new Date("2026-11-11T02:00:00.000Z");
 
 try {
-  const progress_before = await get_or_create_pipeline_progress(
+  const progress_before = await get_or_create_pipeline_state(
     toast_orders_pipeline_name
   );
 
@@ -106,10 +106,10 @@ try {
 
     const history_records = await warehouse_db
       .select()
-      .from(Pipeline_Execution_History)
+      .from(Pipeline_Operation_History)
       .where(and(
-        eq(Pipeline_Execution_History.pipeline_progress_id, progress_before.id),
-        eq(Pipeline_Execution_History.operation, operation)
+        eq(Pipeline_Operation_History.pipeline_state_id, progress_before.id),
+        eq(Pipeline_Operation_History.operation, operation)
       ));
 
     assert.equal(history_records.length, 1);
@@ -153,7 +153,7 @@ try {
     );
   }
 
-  const progress_after = await get_or_create_pipeline_progress(
+  const progress_after = await get_or_create_pipeline_state(
     toast_orders_pipeline_name
   );
 

@@ -1,4 +1,4 @@
-import {ingest_toast_orders} from "../toast/toast-orders.ts";
+import {ingest_toast_orders, process_toast_orders} from "../toast/toast-orders.ts";
 import {
   ingest_toast_locations,
   process_toast_locations
@@ -8,7 +8,7 @@ import type {Pipeline_Command, Pipeline_Stage_Handlers} from "./pipeline-workflo
 
 const toast_pipelines = new Map<string, Pipeline_Stage_Handlers>([
   ["toast-locations", {ingest : ingest_toast_locations, process : process_toast_locations}],
-  ["toast-orders", {ingest : ingest_toast_orders}]
+  ["toast-orders", {ingest : ingest_toast_orders, process : process_toast_orders}]
 ]);
 
 const source_pipelines = new Map<string, ReadonlyMap<string, Pipeline_Stage_Handlers>>([

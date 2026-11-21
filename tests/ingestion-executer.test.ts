@@ -25,6 +25,9 @@ type Test_State = {
   fail_catalog_read : boolean;
   location_name : string;
   location_deleted : unknown;
+  records_read : number;
+  unchanged_load : boolean;
+  fail_read_count : boolean;
 };
 
 test("one ingestion flow with synthetic persistence and source adapters", async context => {
@@ -56,12 +59,17 @@ export const state = {
   restaurants : ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"],
   visits : [], fail_restaurant : null, fail_start_at : null, batches : [],
   known_locations : [], fail_catalog_read : false, location_name : "Synthetic location",
-  location_deleted : false
+  location_deleted : false, records_read : 0, unchanged_load : false, fail_read_count : false
 };
 `);
-    writeFileSync(join(system_directory, "pipeline-history.ts"), `
+    writeFileSync(join(system_directory, "pipeline-operation-history.ts"), `
+import {state} from "../../test-state.ts";
 export async function record_pipeline_execution_start() { return "synthetic-execution"; }
 export async function record_pipeline_execution_completion() {}
+export async function record_ingestion_records_read(execution_id, count) {
+  if (state.fail_read_count) throw new Error("Synthetic read-count failure.");
+  state.records_read += count;
+}
 `);
     writeFileSync(join(system_directory, "system-logger.ts"), `
 export const log_entries = [];
@@ -79,9 +87,9 @@ function create_logger(bindings) {
 
 export const system_logger = create_logger({});
 `);
-    writeFileSync(join(system_directory, "pipeline-progress.ts"), `
+    writeFileSync(join(system_directory, "pipeline-state.ts"), `
 import {state} from "../../test-state.ts";
-export async function get_or_create_pipeline_progress() {
+export async function get_or_create_pipeline_state() {
   return {ingestion_watermark : state.watermark};
 }
 export async function record_ingestion_window_completion(name, id, previous, end_at) {
@@ -101,7 +109,7 @@ export async function load_raw_records(table, execution_id, records) {
   if (getTableName(table) === "toast_locations") {
     state.known_locations = [...new Set([...state.known_locations, ...records.map(record => record.source_record_id)])];
   }
-  return records.length;
+  return state.unchanged_load ? 0 : records.length;
 }
 `);
     writeFileSync(join(system_directory, "pgsql-warehouse.ts"), `
@@ -191,6 +199,9 @@ export async function request_toast_authorized_json(url, options) {
       state.fail_catalog_read = false;
       state.location_name = "Synthetic location";
       state.location_deleted = false;
+      state.records_read = 0;
+      state.unchanged_load = false;
+      state.fail_read_count = false;
     };
     const raw_location = {
       id : "33333333-3333-4333-8333-333333333333",
@@ -424,7 +435,34 @@ export async function request_toast_authorized_json(url, options) {
         }}));
         assert.equal(state.watermark, null);
         assert.equal(state.checkpoints.length, 0);
+        assert.equal(state.records_read, 1);
       }
+    });
+    await context.test("counts replayed source records even when Raw is unchanged, and surfaces metric failures", async () => {
+      reset();
+      state.unchanged_load = true;
+      await execute_ingestion({
+        raw_table : Raw_Toast_Orders,
+        operation : "ingestion",
+        start_at : new Date("2026-01-01T00:00:00Z"),
+        end_at : new Date("2026-01-02T00:00:00Z"),
+        signal,
+        extract_window : async function* () {
+          yield [{source_record_id : "unchanged", content : {}}];
+          yield [{source_record_id : "unchanged", content : {}}];
+        }
+      });
+      assert.equal(state.records_read, 2);
+      assert.equal(log_entries.find(entry => entry.event === "ingestion_window_completed")?.records_changed, 0);
+
+      reset();
+      state.fail_read_count = true;
+      await assert.rejects(execute_ingestion({
+        ...settings,
+        extract_window : async function* () {yield [{source_record_id : "record", content : {}}];}
+      }));
+      assert.deepEqual(state.loaded, []);
+      assert.deepEqual(state.checkpoints, []);
     });
     await context.test("logs checkpoint failures without reporting a completed window", async () => {
       reset();
@@ -480,6 +518,7 @@ export async function request_toast_authorized_json(url, options) {
       });
       assert.equal(state.watermark, original_watermark);
       assert.equal(state.checkpoints.length, 0);
+      assert.equal(state.records_read, 1);
     });
     await context.test("warns for new catalog identities but not repeat refreshes or name changes", async () => {
       reset();
@@ -654,6 +693,7 @@ export async function request_toast_authorized_json(url, options) {
         });
         assert.equal(state.watermark, watermark);
         assert.equal(state.checkpoints.length, 0);
+        assert.equal(state.records_read, 101);
       }
     });
     await context.test("invalid location snapshots fail before any Raw writes", async () => {
@@ -663,6 +703,7 @@ export async function request_toast_authorized_json(url, options) {
         state.restaurants = locations;
         await assert.rejects(ingest_toast_locations(signal));
         assert.equal(state.batches.length, 0);
+        assert.equal(state.records_read, 0);
       }
       for (const deleted of [undefined, null, "false"]) {
         reset();
@@ -677,6 +718,7 @@ export async function request_toast_authorized_json(url, options) {
       state.fail_load = true;
       await assert.rejects(ingest_toast_locations(signal));
       assert.equal(state.batches.length, 0);
+      assert.equal(state.records_read, 1);
       assert.equal(get_location_warnings().length, 1);
       log_entries.length = 0;
       state.fail_load = false;

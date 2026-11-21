@@ -5,42 +5,44 @@ import {join, resolve} from "node:path";
 import {test} from "node:test";
 import {pathToFileURL} from "node:url";
 
-type Progress_Module = typeof import("../core/system/pipeline-progress.ts");
+type State_Module = typeof import("../core/system/pipeline-state.ts");
 type Persistence_State = {
   execution_exists : boolean;
   progress_matches : boolean;
   fail_history : boolean;
   watermark : Date | null;
   history_watermark : Date | null;
+  ingestion_at : Date | null;
   rollbacks : number;
   predicates : Array<{sql : string; params : unknown[]}>;
 };
 
 test("window checkpoint transaction with synthetic warehouse persistence", async context => {
-  const directory = mkdtempSync(join(tmpdir(), "pipeline-progress-test-"));
+  const directory = mkdtempSync(join(tmpdir(), "pipeline-state-test-"));
   try {
     writeFileSync(join(directory, "package.json"), '{"type":"module"}');
     symlinkSync(resolve(import.meta.dirname, "..", "node_modules"), join(directory, "node_modules"), "junction");
-    for (const filename of ["pipeline-progress.ts", "system-schema.ts"]) {
+    for (const filename of ["pipeline-state.ts", "system-schema.ts"]) {
       copyFileSync(resolve(import.meta.dirname, "..", "core", "system", filename), join(directory, filename));
     }
     writeFileSync(join(directory, "pgsql-warehouse.ts"), `
 import {PgDialect} from "drizzle-orm/pg-core";
-import {Pipeline_Progress} from "./system-schema.ts";
+import {Pipeline_State} from "./system-schema.ts";
 const dialect = new PgDialect();
 export const state = {
   execution_exists : true, progress_matches : true, fail_history : false,
-  watermark : null, history_watermark : null, rollbacks : 0, predicates : []
+  watermark : null, history_watermark : null, ingestion_at : new Date("2026-01-01T00:00:00Z"),
+  rollbacks : 0, predicates : []
 };
 export const warehouse_db = {
   async transaction(work) {
-    const before = {watermark : state.watermark, history_watermark : state.history_watermark};
+    const before = {watermark : state.watermark, history_watermark : state.history_watermark, ingestion_at : state.ingestion_at};
     const selection = {
       from() {return this;}, innerJoin() {return this;},
       where(predicate) {state.predicates.push(dialect.sqlToQuery(predicate)); return this;},
       async for(mode) {
         if (mode !== "update") throw new Error("Missing checkpoint lock.");
-        return state.execution_exists ? [{pipeline_progress_id : "synthetic-progress"}] : [];
+        return state.execution_exists ? [{pipeline_state_id : "synthetic-progress"}] : [];
       }
     };
     try {
@@ -50,10 +52,11 @@ export const warehouse_db = {
           return {set(values) {return {
             where(predicate) {
               state.predicates.push(dialect.sqlToQuery(predicate));
-              if (table === Pipeline_Progress) {
+              if (table === Pipeline_State) {
                 return {async returning() {
                   if (!state.progress_matches) return [];
                   state.watermark = values.ingestion_watermark;
+                  if (values.last_successful_ingestion_at !== undefined) state.ingestion_at = values.last_successful_ingestion_at;
                   return [{id : "synthetic-progress"}];
                 }};
               }
@@ -67,20 +70,22 @@ export const warehouse_db = {
     } catch (error) {
       state.watermark = before.watermark;
       state.history_watermark = before.history_watermark;
+      state.ingestion_at = before.ingestion_at;
       state.rollbacks++;
       throw error;
     }
   }
 };
 `);
-    const {record_ingestion_window_completion} : Progress_Module =
-      await import(pathToFileURL(join(directory, "pipeline-progress.ts")).href);
+    const {record_ingestion_window_completion} : State_Module =
+      await import(pathToFileURL(join(directory, "pipeline-state.ts")).href);
     const {state} : {state : Persistence_State} =
       await import(pathToFileURL(join(directory, "pgsql-warehouse.ts")).href);
     const first_end = new Date("2026-01-02T00:00:00.000Z");
     const second_end = new Date("2026-01-03T00:00:00.000Z");
 
     await context.test("checks the running pipeline and expected watermark before saving coverage and history", async () => {
+      const previous_success = state.ingestion_at;
       await record_ingestion_window_completion("toast_orders", "synthetic-execution", null, first_end);
       assert.equal(state.watermark, first_end);
       assert.equal(state.history_watermark, first_end);
@@ -91,6 +96,7 @@ export const warehouse_db = {
       assert.ok(state.predicates[4]?.params.includes(first_end.toISOString()));
       assert.equal(state.watermark, second_end);
       assert.equal(state.history_watermark, second_end);
+      assert.equal(state.ingestion_at, previous_success);
     });
     await context.test("mismatched execution or changed progress refuses checkpoint advancement", async () => {
       for (const scenario of ["execution", "progress"]) {

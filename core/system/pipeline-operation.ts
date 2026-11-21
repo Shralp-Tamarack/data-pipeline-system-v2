@@ -1,7 +1,7 @@
 import {
   record_pipeline_execution_start,
   record_pipeline_execution_completion
-} from "./pipeline-history.ts";
+} from "./pipeline-operation-history.ts";
 import type {Logger} from "pino";
 import { system_logger } from "./system-logger.ts";
 import type {Pipeline_Operation_Result} from "./pipeline-types.ts";
@@ -41,7 +41,7 @@ export async function execute_tracked_pipeline_operation(
         event : "pipeline_history_start_failed",
         pipeline_name : pipeline_name,
         operation : operation
-      }, "Could not register pipeline execution; work was not started");
+      }, "Could not register pipeline operation; work was not started");
 
       throw error;
     }
@@ -56,7 +56,7 @@ export async function execute_tracked_pipeline_operation(
 
     pipeline_logger.info({
       event : "pipeline_started"
-    }, "Pipeline execution started");
+    }, "Pipeline operation started");
 
     let outcome : Pipeline_Operation_Outcome;
 
@@ -67,7 +67,7 @@ export async function execute_tracked_pipeline_operation(
       pipeline_logger.error({
         event : "pipeline_work_failed",
         duration_ms : Math.round(performance.now() - started_at)
-      }, "Pipeline work failed; previously committed data remains saved");
+      }, "Pipeline operation failed; previously committed data remains saved");
 
       try {
         await record_pipeline_execution_completion(execution_id, {
@@ -78,7 +78,7 @@ export async function execute_tracked_pipeline_operation(
         pipeline_logger.error({
           event : "pipeline_history_completion_failed",
           intended_status : "failed"
-        }, "Pipeline work failed and its failed status could not be saved");
+        }, "Pipeline operation failed and its failed status could not be saved");
 
         throw history_error;
       }
@@ -93,7 +93,7 @@ export async function execute_tracked_pipeline_operation(
         event : "pipeline_history_completion_failed",
         intended_status : outcome.status,
         duration_ms : Math.round(performance.now() - started_at)
-      }, "Pipeline work returned an outcome, but execution history could not be finalized");
+      }, "Pipeline operation returned an outcome, but execution history could not be finalized");
 
       throw history_error;
     }
@@ -105,9 +105,9 @@ export async function execute_tracked_pipeline_operation(
     };
 
     if (outcome.status === "succeeded") {
-      pipeline_logger.info(completion_details, "Pipeline execution completed");
+      pipeline_logger.info(completion_details, "Pipeline operation completed");
     } else {
-      pipeline_logger.warn(completion_details, "Pipeline execution ended without full success");
+      pipeline_logger.warn(completion_details, "Pipeline operation ended without full success");
     }
 
     return {execution_id : execution_id, status : outcome.status};

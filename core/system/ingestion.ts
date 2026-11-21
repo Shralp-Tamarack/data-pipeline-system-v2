@@ -7,10 +7,11 @@ import {create_ingestion_windows, default_ingestion_window_days} from "./ingesti
 import {execute_tracked_pipeline_operation} from "./pipeline-operation.ts";
 import type {Pipeline_Operation_Result} from "./pipeline-types.ts";
 import {load_raw_records} from "./raw-pipeline-loader.ts";
+import {record_ingestion_records_read} from "./pipeline-operation-history.ts";
 import {
-  get_or_create_pipeline_progress,
+  get_or_create_pipeline_state,
   record_ingestion_window_completion
-} from "./pipeline-progress.ts";
+} from "./pipeline-state.ts";
 
 type Ingestion_Settings = {
   raw_table : ReturnType<typeof create_raw_table>;
@@ -57,10 +58,10 @@ export async function execute_ingestion(
     settings.operation,
     async (execution_id, pipeline_logger) => {
       const source_configuration = settings.source_configuration;
-      const progress = source_configuration
-        ? await get_or_create_pipeline_progress(pipeline_name)
+      const pipeline_state = source_configuration
+        ? await get_or_create_pipeline_state(pipeline_name)
         : undefined;
-      let previous_watermark = progress?.ingestion_watermark ?? null;
+      let previous_watermark = pipeline_state?.ingestion_watermark ?? null;
 
       if (source_configuration && !Number.isFinite(source_configuration.data_start_date.getTime())) {
         throw new Error("Source data_start_date must be a valid date.");
@@ -114,6 +115,7 @@ export async function execute_ingestion(
           settings.signal,
           pipeline_logger
         )) {
+          await record_ingestion_records_read(execution_id, records.length);
           settings.signal.throwIfAborted();
 
           const changed_record_count = await load_raw_records(

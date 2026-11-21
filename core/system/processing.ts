@@ -3,7 +3,7 @@ import {execute_tracked_pipeline_operation} from "./pipeline-operation.ts";
 import type {Logger} from "pino";
 import type {Pipeline_Operation_Result} from "./pipeline-types.ts";
 import {warehouse_db} from "./pgsql-warehouse.ts";
-import {create_raw_table, Pipeline_Execution_History, Pipeline_Progress} from "./system-schema.ts";
+import {create_raw_table, Pipeline_Operation_History, Pipeline_State} from "./system-schema.ts";
 import type {Processing_Transaction, Raw_Processing_Record} from "./processing-types.ts";
 
 type Processing_Settings = {
@@ -17,7 +17,7 @@ type Processing_Settings = {
     finalize_processing? : (pipeline_logger : Logger) => Promise<void>;
 }
 
-// Keep history/progress-before-Raw lock order consistent with ingestion.
+// Keep history/state-before-Raw lock order consistent with ingestion.
 async function process_next_raw_batch(
     settings : Processing_Settings,
     execution_id : string
@@ -27,16 +27,16 @@ async function process_next_raw_batch(
 
     return warehouse_db.transaction(async transaction => {
         const [execution_record] = await transaction
-            .select({pipeline_name : Pipeline_Progress.pipeline_name})
-            .from(Pipeline_Execution_History)
+            .select({pipeline_name : Pipeline_State.pipeline_name})
+            .from(Pipeline_Operation_History)
             .innerJoin(
-                Pipeline_Progress,
-                eq(Pipeline_Execution_History.pipeline_progress_id, Pipeline_Progress.id)
+                Pipeline_State,
+                eq(Pipeline_Operation_History.pipeline_state_id, Pipeline_State.id)
             )
             .where(and(
-                eq(Pipeline_Execution_History.id, execution_id),
-                eq(Pipeline_Execution_History.operation, "processing"),
-                eq(Pipeline_Execution_History.status, "running")
+                eq(Pipeline_Operation_History.id, execution_id),
+                eq(Pipeline_Operation_History.operation, "processing"),
+                eq(Pipeline_Operation_History.status, "running")
             ))
             .for("update");
 
@@ -75,16 +75,16 @@ async function process_next_raw_batch(
         }
 
         const [execution] = await transaction
-            .update(Pipeline_Execution_History)
+            .update(Pipeline_Operation_History)
             .set({
-                records_processed : sql`${Pipeline_Execution_History.records_processed} + ${processed_records.length}`
+                records_processed : sql`${Pipeline_Operation_History.records_processed} + ${processed_records.length}`
             })
             .where(and(
-                eq(Pipeline_Execution_History.id, execution_id),
-                eq(Pipeline_Execution_History.operation, "processing"),
-                eq(Pipeline_Execution_History.status, "running")
+                eq(Pipeline_Operation_History.id, execution_id),
+                eq(Pipeline_Operation_History.operation, "processing"),
+                eq(Pipeline_Operation_History.status, "running")
             ))
-            .returning({id : Pipeline_Execution_History.id});
+            .returning({id : Pipeline_Operation_History.id});
 
         if (!execution) {
             throw new Error("Raw processing requires a running processing execution.");

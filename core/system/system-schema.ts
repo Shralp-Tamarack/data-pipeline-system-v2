@@ -15,7 +15,7 @@ import { sql } from "drizzle-orm";
 
 export const System_Schema = pgSchema("system");
 
-export const Pipeline_Progress = System_Schema.table("pipeline_progress", {
+export const Pipeline_State = System_Schema.table("pipeline_state", {
   id : uuid("id").primaryKey().defaultRandom(),
 
   pipeline_name : text("pipeline_name").notNull().unique(),
@@ -54,14 +54,14 @@ export const Pipeline_Execution_Status = System_Schema.enum(
   ]
 );
 
-export const Pipeline_Execution_History = System_Schema.table(
-  "pipeline_history",
+export const Pipeline_Operation_History = System_Schema.table(
+  "pipeline_operation_history",
   {
     id : uuid("id").primaryKey().defaultRandom(),
 
-    pipeline_progress_id : uuid("pipeline_progress_id")
+    pipeline_state_id : uuid("pipeline_state_id")
       .notNull()
-      .references(() => Pipeline_Progress.id, {onDelete : "restrict"}),
+      .references(() => Pipeline_State.id, {onDelete : "restrict"}),
 
     operation : text("operation").notNull(),
     status : Pipeline_Execution_Status("status")
@@ -79,6 +79,7 @@ export const Pipeline_Execution_History = System_Schema.table(
 
     error_summary : text("error_summary"),
 
+    records_read : integer("records_read"),
     records_loaded : integer("records_loaded").notNull().default(0),
     records_processed : integer("records_processed").notNull().default(0),
 
@@ -88,8 +89,8 @@ export const Pipeline_Execution_History = System_Schema.table(
     finished_at : timestamp("finished_at", {withTimezone : true})
   },
   table => [
-    index("pipeline_execution_history_progress_started_at_idx")
-      .on(table.pipeline_progress_id, table.started_at)
+    index("pipeline_operation_history_state_started_at_idx")
+      .on(table.pipeline_state_id, table.started_at)
   ]
 );
 
@@ -102,7 +103,7 @@ export function create_raw_table(pipeline_name : string) {
 
     execution_id : uuid("execution_id")
       .notNull()
-      .references(() => Pipeline_Execution_History.id, {
+      .references(() => Pipeline_Operation_History.id, {
         onDelete : "restrict"
       }),
 
@@ -164,7 +165,7 @@ export function create_processed_columns(
 
       execution_id : uuid("execution_id")
         .notNull()
-        .references(() => Pipeline_Execution_History.id, {
+        .references(() => Pipeline_Operation_History.id, {
           onDelete : "restrict"
         }),
 
@@ -177,3 +178,5 @@ export function create_processed_columns(
     }
   };
 }
+
+export const Refined_Schema = pgSchema("refined");

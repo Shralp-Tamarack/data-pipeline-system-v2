@@ -33,7 +33,7 @@ test("per-pipeline overlap protection with synthetic history persistence", async
       resolve(import.meta.dirname, "..", "core", "system", "pipeline-operation.ts"),
       join(test_directory, "pipeline-operation.ts")
     );
-    writeFileSync(join(test_directory, "pipeline-history.ts"), `
+    writeFileSync(join(test_directory, "pipeline-operation-history.ts"), `
 export const test_state = {starts : 0, fail_start : false, fail_completion : false, completions : []};
 export async function record_pipeline_execution_start(): Promise<string> {
   test_state.starts++;
@@ -63,7 +63,7 @@ export const system_logger = create_logger({});
     const {execute_tracked_pipeline_operation} : Operation_Module =
       await import(pathToFileURL(join(test_directory, "pipeline-operation.ts")).href);
     const {test_state} : History_Test_Module =
-      await import(pathToFileURL(join(test_directory, "pipeline-history.ts")).href);
+      await import(pathToFileURL(join(test_directory, "pipeline-operation-history.ts")).href);
     const {log_entries} : {log_entries : Test_Log_Entry[]} =
       await import(pathToFileURL(join(test_directory, "system-logger.ts")).href);
 

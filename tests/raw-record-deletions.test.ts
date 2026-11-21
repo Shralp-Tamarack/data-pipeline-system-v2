@@ -42,7 +42,7 @@ test("shared Raw deletion helper with synthetic transactional persistence", asyn
     writeFileSync(join(directory, "pgsql-warehouse.ts"), `
 import assert from "node:assert/strict";
 import {PgDialect} from "drizzle-orm/pg-core";
-import {Pipeline_Execution_History} from "./system-schema.ts";
+import {Pipeline_Operation_History} from "./system-schema.ts";
 const dialect = new PgDialect();
 export const state = {
   records : [], count : 0, execution_valid : true, pipeline_name : "synthetic_records",
@@ -56,7 +56,7 @@ export const warehouse_db = {
       return await work({
         select() {
           return {
-            from(table) {assert.equal(table, Pipeline_Execution_History); return this;},
+            from(table) {assert.equal(table, Pipeline_Operation_History); return this;},
             innerJoin() {return this;},
             where(predicate) {
               const query = dialect.sqlToQuery(predicate);
@@ -75,7 +75,7 @@ export const warehouse_db = {
         update(table) {
           return {set(values) {return {where(predicate) {
             const query = dialect.sqlToQuery(predicate);
-            if (table === Pipeline_Execution_History) {
+            if (table === Pipeline_Operation_History) {
               assert.deepEqual(query.params, ["current-execution"]);
               assert.match(query.sql, /"id"/);
               assert.deepEqual(Object.keys(values), ["records_loaded"]);

@@ -41,6 +41,7 @@ export const process_toast_locations = signal => execute_stage(signal, "PROCESS_
     writeFileSync(join(toast_directory, "toast-orders.ts"), `
 import {execute_stage} from "./test-stage.ts";
 export const ingest_toast_orders = signal => execute_stage(signal, "INGEST_ORDERS");
+export const process_toast_orders = signal => execute_stage(signal, "PROCESS_ORDERS");
 `);
     writeFileSync(join(toast_directory, "toast-request.ts"), `
 export class Toast_Request_Error extends Error {}
@@ -63,12 +64,15 @@ export class Toast_Request_Error extends Error {}
       return result;
     }
 
-    await context.test("runs individual stages, source ingestion, and location sync in order", () => {
+    await context.test("runs individual stages and source workflows in dependency order", () => {
       for (const [command, target, handlers] of [
         ["process", "toast-locations", ["CALLED_PROCESS_LOCATIONS"]],
         ["ingest", "toast-orders", ["CALLED_INGEST_ORDERS"]],
         ["ingest", "toast", ["CALLED_INGEST_LOCATIONS", "CALLED_INGEST_ORDERS"]],
-        ["sync", "toast-locations", ["CALLED_INGEST_LOCATIONS", "CALLED_PROCESS_LOCATIONS"]]
+        ["process", "toast", ["CALLED_PROCESS_LOCATIONS", "CALLED_PROCESS_ORDERS"]],
+        ["sync", "toast", [
+          "CALLED_INGEST_LOCATIONS", "CALLED_PROCESS_LOCATIONS", "CALLED_INGEST_ORDERS", "CALLED_PROCESS_ORDERS"
+        ]]
       ] as const) {
         const result = execute_cli([command, target]);
         assert.equal(result.status, 0, result.stderr);
@@ -76,11 +80,8 @@ export class Toast_Request_Error extends Error {}
       }
     });
 
-    await context.test("rejects unavailable processing, sync, or reconciliation before starting any stage", () => {
+    await context.test("rejects unsupported reconciliation before starting any stage", () => {
       for (const [command, target, message] of [
-        ["sync", "toast", /process is not implemented for toast-orders/],
-        ["sync", "toast-orders", /process is not implemented for toast-orders/],
-        ["process", "toast", /process is not implemented for toast-orders/],
         ["reconcile", "toast", /reconcile is not supported for toast/],
         ["reconcile", "toast-locations", /reconcile is not supported for toast-locations/]
       ] as const) {

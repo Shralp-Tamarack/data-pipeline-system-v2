@@ -9,6 +9,7 @@ const pretty_stream = env_vars.log_format === "pretty"
       hideObject : true,
       messageFormat :
         "{if pipeline_name}{pipeline_name} {end}" +
+        "{if operation}{operation} {end}" +
         "{if execution_id}[{execution_id}] {end}{msg}",
       sync : true
     })

@@ -2,19 +2,19 @@ import assert from "node:assert/strict";
 import {eq} from "drizzle-orm";
 import {env_vars} from "../core/system/system-configuration.ts";
 import {warehouse_db, warehouse_pool} from "../core/system/pgsql-warehouse.ts";
-import {Pipeline_Execution_History} from "../core/system/system-schema.ts";
-import {get_or_create_pipeline_progress} from "../core/system/pipeline-progress.ts";
+import {Pipeline_Operation_History} from "../core/system/system-schema.ts";
+import {get_or_create_pipeline_state} from "../core/system/pipeline-state.ts";
 import {
   record_pipeline_execution_start,
   record_pipeline_execution_completion
-} from "../core/system/pipeline-history.ts";
+} from "../core/system/pipeline-operation-history.ts";
 
 if (env_vars.system_environment !== "experimental") {
   throw new Error("Run this check only in the experimental environment.");
 }
 
 try {
-  const progress_before = await get_or_create_pipeline_progress(
+  const progress_before = await get_or_create_pipeline_state(
     "sandbox_execution_check"
   );
 
@@ -43,8 +43,8 @@ try {
 
   const [execution_record] = await warehouse_db
     .select()
-    .from(Pipeline_Execution_History)
-    .where(eq(Pipeline_Execution_History.id, execution_id));
+    .from(Pipeline_Operation_History)
+    .where(eq(Pipeline_Operation_History.id, execution_id));
 
   assert.ok(execution_record, "Execution history record is missing.");
   assert.equal(execution_record.status, "succeeded");
@@ -60,7 +60,7 @@ try {
     progress_before.ingestion_watermark
   );
 
-  const progress_after = await get_or_create_pipeline_progress(
+  const progress_after = await get_or_create_pipeline_state(
     "sandbox_execution_check"
   );
 

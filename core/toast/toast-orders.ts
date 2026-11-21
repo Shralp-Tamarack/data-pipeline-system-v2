@@ -10,19 +10,224 @@ import type { Raw_Record_Input } from "../system/ingestion-types.ts";
 import {execute_ingestion} from "../system/ingestion.ts";
 import type {Pipeline_Operation_Result} from "../system/pipeline-types.ts";
 import {get_toast_locations} from "./toast-locations.ts";
-import {Raw_Toast_Orders} from "./toast-schema.ts";
+import {
+  Processed_Toast_Locations,
+  Processed_Toast_Orders,
+  Raw_Toast_Orders,
+  toast_source_system_name
+} from "./toast-schema.ts";
+import {and, eq, inArray, sql} from "drizzle-orm";
+import type {Processing_Transaction, Raw_Processing_Record} from "../system/processing-types.ts";
+import {process_pending_raw_records} from "../system/processing.ts";
 
-const toast_order_schema = z.object({
+const toast_order_ingestion_validator = z.object({
   guid : z.string().refine(
     order_guid => order_guid.trim().length > 0
   ),
   deleted : z.boolean()
 }).passthrough();
 
-type Toast_Order_Record = z.infer<typeof toast_order_schema>;
+type Toast_Api_Order = z.infer<typeof toast_order_ingestion_validator>;
+
+const toast_order_processing_validator = z.object({
+  guid : z.string().min(1),
+  deleted : z.boolean(),
+  voided : z.boolean(),
+  excessFood : z.boolean(),
+  createdInTestMode : z.boolean(),
+  businessDate : z.number().int(),
+  createdDate : z.string(),
+  modifiedDate : z.string(),
+  checks : z.array(z.object({
+    deleted : z.boolean(),
+    voided : z.boolean(),
+    amount : z.number(),
+    selections : z.array(z.object({
+      voided : z.boolean(),
+      deferred : z.boolean(),
+      selectionType : z.string().nullable(),
+      price : z.number()
+    })),
+    appliedServiceCharges : z.array(z.object({
+      chargeAmount : z.number(),
+      serviceChargeCategory : z.string().nullable()
+    })).nullable()
+  }))
+});
+
+function convert_to_cents(amount : number) : number {
+  return Math.round(amount * 100);
+}
+
+// Toast sends offsets like "+0000"; add the colon so parsing is unambiguous.
+function parse_toast_timestamp(value : string) : Date {
+  const timestamp = new Date(value.replace(/([+-]\d{2})(\d{2})$/, "$1:$2"));
+
+  if (Number.isNaN(timestamp.getTime())) {
+    throw new Error("Toast order has an invalid timestamp.");
+  }
+
+  return timestamp;
+}
+
+function format_business_date(business_date : number) : string {
+  const date_text = String(business_date);
+  const formatted_date =
+    `${date_text.slice(0, 4)}-${date_text.slice(4, 6)}-${date_text.slice(6, 8)}`;
+
+  if (
+    !/^\d{8}$/.test(date_text) ||
+    Number.isNaN(Date.parse(`${formatted_date}T00:00:00Z`)) ||
+    new Date(`${formatted_date}T00:00:00Z`).toISOString().slice(0, 10) !== formatted_date
+  ) {
+    throw new Error("Toast order has an invalid business date.");
+  }
+
+  return formatted_date;
+}
+
+type Raw_Toast_Order = Pick<
+  typeof Raw_Toast_Orders.$inferSelect,
+  "id" | "source_record_id" | "content" | "content_revision" | "deleted"
+>;
+
+/** Maps one Raw order to processed values; the writer resolves its location. */
+export function map_toast_order(raw_order : Raw_Toast_Order) {
+  const validation_result = toast_order_processing_validator.safeParse(raw_order.content);
+
+  if (!validation_result.success) {
+    throw new Error("Raw Toast order does not match the processing contract.");
+  }
+
+  const order = validation_result.data;
+
+  if (order.guid !== raw_order.source_record_id) {
+    throw new Error("Raw Toast order identity does not match its content.");
+  }
+
+  const included_checks = order.checks.filter(check => !check.deleted && !check.voided);
+  let net_sales_cents = 0;
+
+  for (const check of included_checks) {
+    net_sales_cents += convert_to_cents(check.amount);
+
+    for (const selection of check.selections) {
+      if (
+        !selection.voided &&
+        (selection.deferred || selection.selectionType === "HOUSE_ACCOUNT_PAY_BALANCE")
+      ) {
+        net_sales_cents -= convert_to_cents(selection.price);
+      }
+    }
+
+    for (const service_charge of check.appliedServiceCharges ?? []) {
+      if (service_charge.serviceChargeCategory === "FUNDRAISING_CAMPAIGN") {
+        net_sales_cents -= convert_to_cents(service_charge.chargeAmount);
+      }
+    }
+  }
+
+  return {
+    raw_record_id : raw_order.id,
+    source_system : toast_source_system_name,
+    source_record_id : raw_order.source_record_id,
+    business_date : format_business_date(order.businessDate),
+    voided : order.voided,
+    excess_food : order.excessFood,
+    created_in_test_mode : order.createdInTestMode,
+    net_sales_amount : (net_sales_cents / 100).toFixed(2),
+    check_count : included_checks.length,
+    source_created_at : parse_toast_timestamp(order.createdDate),
+    source_modified_at : parse_toast_timestamp(order.modifiedDate),
+    deleted : raw_order.deleted || order.deleted,
+    raw_content_revision : raw_order.content_revision
+  };
+}
+
+const order_processing_version = 1;
+
+function get_order_restaurant_guid(raw_order : Raw_Processing_Record) : string {
+  const restaurant_guid = raw_order.source_context?.restaurant_guid;
+
+  if (typeof restaurant_guid !== "string" || !restaurant_guid) {
+    throw new Error("Raw Toast order has no restaurant GUID in its source context.");
+  }
+
+  return restaurant_guid;
+}
+
+async function write_processed_orders(
+  transaction : Processing_Transaction,
+  raw_orders : Raw_Processing_Record[],
+  execution_id : string
+) : Promise<void> {
+  const restaurant_guids = [...new Set(raw_orders.map(get_order_restaurant_guid))];
+
+  const locations = await transaction
+    .select({
+      id : Processed_Toast_Locations.id,
+      source_record_id : Processed_Toast_Locations.source_record_id
+    })
+    .from(Processed_Toast_Locations)
+    .where(and(
+      eq(Processed_Toast_Locations.source_system, toast_source_system_name),
+      inArray(Processed_Toast_Locations.source_record_id, restaurant_guids)
+    ));
+
+  const location_ids = new Map(
+    locations.map(location => [location.source_record_id, location.id])
+  );
+
+  const processed_orders = raw_orders.map(raw_order => {
+    const location_id = location_ids.get(get_order_restaurant_guid(raw_order));
+
+    if (!location_id) {
+      throw new Error("Toast order location has not been processed; process toast-locations first.");
+    }
+
+    return {
+      ...map_toast_order(raw_order),
+      location_id : location_id,
+      processing_version : order_processing_version,
+      execution_id : execution_id
+    };
+  });
+
+  await transaction
+    .insert(Processed_Toast_Orders)
+    .values(processed_orders)
+    .onConflictDoUpdate({
+      target : [Processed_Toast_Orders.source_system, Processed_Toast_Orders.source_record_id],
+      set : {
+        business_date : sql`excluded.business_date`,
+        voided : sql`excluded.voided`,
+        excess_food : sql`excluded.excess_food`,
+        created_in_test_mode : sql`excluded.created_in_test_mode`,
+        net_sales_amount : sql`excluded.net_sales_amount`,
+        check_count : sql`excluded.check_count`,
+        source_modified_at : sql`excluded.source_modified_at`,
+        deleted : sql`excluded.deleted`,
+        raw_content_revision : sql`excluded.raw_content_revision`,
+        processing_version : sql`excluded.processing_version`,
+        execution_id : sql`excluded.execution_id`,
+        updated_at : sql`now()`
+      }
+    });
+}
+
+/** Processes pending raw orders into processed orders in transactional batches */
+export async function process_toast_orders(
+  signal : AbortSignal
+) : Promise<Pipeline_Operation_Result> {
+  return process_pending_raw_records({
+    raw_table : Raw_Toast_Orders,
+    signal : signal,
+    write_processed_records : write_processed_orders
+  });
+}
 
 type Toast_Order_Page = {
-  order_records : Toast_Order_Record[];
+  order_records : Toast_Api_Order[];
   pagination_header_present : boolean;
 };
 
@@ -58,7 +263,7 @@ export async function get_toast_order_page(
     }
   });
 
-  const validation_result = z.array(toast_order_schema)
+  const validation_result = z.array(toast_order_ingestion_validator)
     .max(10)
     .safeParse(response.data);
 
@@ -78,7 +283,7 @@ export async function* extract_toast_order_window(
   window : Ingestion_Window,
   signal : AbortSignal,
   logger? : Logger
-): AsyncGenerator<Toast_Order_Record[], void, unknown> {
+): AsyncGenerator<Toast_Api_Order[], void, unknown> {
   if (!z.uuid().safeParse(restaurant_guid).success) {
     throw new Error("A valid Toast restaurant GUID is required.");
   }
@@ -130,7 +335,7 @@ export async function* extract_toast_order_window(
       }
     });
 
-    const validation_result = z.array(toast_order_schema)
+    const validation_result = z.array(toast_order_ingestion_validator)
       .max(page_size)
       .safeParse(response.data);
 

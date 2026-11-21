@@ -6,11 +6,11 @@ import {and, eq, sql} from "drizzle-orm";
 import {env_vars} from "../core/system/system-configuration.ts";
 import {warehouse_db, warehouse_pool} from "../core/system/pgsql-warehouse.ts";
 import {execute_ingestion} from "../core/system/ingestion.ts";
-import {get_or_create_pipeline_progress} from "../core/system/pipeline-progress.ts";
+import {get_or_create_pipeline_state} from "../core/system/pipeline-state.ts";
 import {
   create_raw_table,
-  Pipeline_Execution_History,
-  Pipeline_Progress
+  Pipeline_Operation_History,
+  Pipeline_State
 } from "../core/system/system-schema.ts";
 
 type Check_Phase = "interrupt" | "resume";
@@ -21,7 +21,7 @@ async function check_phase(
   start_at : Date
 ): Promise<void> {
   const raw_table = create_raw_table(pipeline_name);
-  const progress_before = await get_or_create_pipeline_progress(pipeline_name);
+  const progress_before = await get_or_create_pipeline_state(pipeline_name);
   const first_end = new Date(start_at.getTime() + 3_600_000);
   const second_end = new Date(first_end.getTime() + 3_600_000);
   assert.equal(
@@ -78,13 +78,13 @@ async function check_phase(
     await execution;
   }
   const after_execution = Date.now();
-  const progress_after = await get_or_create_pipeline_progress(pipeline_name);
+  const progress_after = await get_or_create_pipeline_state(pipeline_name);
   const [history] = await warehouse_db
     .select()
-    .from(Pipeline_Execution_History)
+    .from(Pipeline_Operation_History)
     .where(and(
-      eq(Pipeline_Execution_History.pipeline_progress_id, progress_before.id),
-      eq(Pipeline_Execution_History.operation, phase)
+      eq(Pipeline_Operation_History.pipeline_state_id, progress_before.id),
+      eq(Pipeline_Operation_History.operation, phase)
     ));
   assert.ok(history);
   assert.equal(history.status, phase === "interrupt" ? "failed" : "succeeded");
@@ -169,7 +169,7 @@ async function check_restart(): Promise<void> {
       await transaction.execute(sql`
         CREATE TABLE ${table_name} (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-          execution_id uuid NOT NULL REFERENCES system.pipeline_history(id) ON DELETE RESTRICT,
+          execution_id uuid NOT NULL REFERENCES system.pipeline_operation_history(id) ON DELETE RESTRICT,
           source_record_id text NOT NULL,
           source_context jsonb,
           content jsonb NOT NULL,
@@ -182,7 +182,7 @@ async function check_restart(): Promise<void> {
           UNIQUE (record_source, source_record_id)
         )
       `);
-      await transaction.insert(Pipeline_Progress).values({pipeline_name : pipeline_name});
+      await transaction.insert(Pipeline_State).values({pipeline_name : pipeline_name});
     });
     fixture_created = true;
 
@@ -200,15 +200,15 @@ async function check_restart(): Promise<void> {
 
     await warehouse_db.transaction(async transaction => {
       const [progress] = await transaction
-        .select({id : Pipeline_Progress.id})
-        .from(Pipeline_Progress)
-        .where(eq(Pipeline_Progress.pipeline_name, pipeline_name));
+        .select({id : Pipeline_State.id})
+        .from(Pipeline_State)
+        .where(eq(Pipeline_State.pipeline_name, pipeline_name));
       assert.ok(progress, "Synthetic progress disappeared before cleanup.");
       await transaction.execute(sql`DROP TABLE ${table_name}`);
-      await transaction.delete(Pipeline_Execution_History)
-        .where(eq(Pipeline_Execution_History.pipeline_progress_id, progress.id));
-      await transaction.delete(Pipeline_Progress)
-        .where(eq(Pipeline_Progress.id, progress.id));
+      await transaction.delete(Pipeline_Operation_History)
+        .where(eq(Pipeline_Operation_History.pipeline_state_id, progress.id));
+      await transaction.delete(Pipeline_State)
+        .where(eq(Pipeline_State.id, progress.id));
     });
     console.log("Ingestion restart check succeeded. Temporary table and synthetic metadata removed.");
   } catch {

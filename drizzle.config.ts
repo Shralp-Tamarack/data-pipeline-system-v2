@@ -6,6 +6,7 @@ export default defineConfig({
   schema : [
     "./core/system/system-schema.ts",
     "./core/toast/toast-schema.ts",
+    "./core/refined/food-and-beverage-schema.ts"
   ],
   out : "./drizzle-generated-ddl",
   dbCredentials : {

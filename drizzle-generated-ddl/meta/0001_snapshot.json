@@ -1,11 +1,11 @@
 {
-  "id": "271d064a-62c1-4fbb-b5c2-148d4ee014b6",
-  "prevId": "93daed03-7cc0-44a0-bf72-2e96afb4d47a",
+  "id": "c679455a-57bd-43b4-95fc-8993c344d43c",
+  "prevId": "578d0700-9fc2-4377-98d4-2e0af62b82a8",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
-    "system.pipeline_history": {
-      "name": "pipeline_history",
+    "system.pipeline_operation_history": {
+      "name": "pipeline_operation_history",
       "schema": "system",
       "columns": {
         "id": {
@@ -15,8 +15,8 @@
           "notNull": true,
           "default": "gen_random_uuid()"
         },
-        "pipeline_progress_id": {
-          "name": "pipeline_progress_id",
+        "pipeline_state_id": {
+          "name": "pipeline_state_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -53,6 +53,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "records_read": {
+          "name": "records_read",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "records_loaded": {
           "name": "records_loaded",
           "type": "integer",
@@ -82,11 +88,11 @@
         }
       },
       "indexes": {
-        "pipeline_execution_history_progress_started_at_idx": {
-          "name": "pipeline_execution_history_progress_started_at_idx",
+        "pipeline_operation_history_state_started_at_idx": {
+          "name": "pipeline_operation_history_state_started_at_idx",
           "columns": [
             {
-              "expression": "pipeline_progress_id",
+              "expression": "pipeline_state_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -105,13 +111,13 @@
         }
       },
       "foreignKeys": {
-        "pipeline_history_pipeline_progress_id_pipeline_progress_id_fk": {
-          "name": "pipeline_history_pipeline_progress_id_pipeline_progress_id_fk",
-          "tableFrom": "pipeline_history",
-          "tableTo": "pipeline_progress",
+        "pipeline_operation_history_pipeline_state_id_pipeline_state_id_fk": {
+          "name": "pipeline_operation_history_pipeline_state_id_pipeline_state_id_fk",
+          "tableFrom": "pipeline_operation_history",
+          "tableTo": "pipeline_state",
           "schemaTo": "system",
           "columnsFrom": [
-            "pipeline_progress_id"
+            "pipeline_state_id"
           ],
           "columnsTo": [
             "id"
@@ -126,8 +132,8 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "system.pipeline_progress": {
-      "name": "pipeline_progress",
+    "system.pipeline_state": {
+      "name": "pipeline_state",
       "schema": "system",
       "columns": {
         "id": {
@@ -180,8 +186,8 @@
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "pipeline_progress_pipeline_name_unique": {
-          "name": "pipeline_progress_pipeline_name_unique",
+        "pipeline_state_pipeline_name_unique": {
+          "name": "pipeline_state_pipeline_name_unique",
           "nullsNotDistinct": false,
           "columns": [
             "pipeline_name"
@@ -192,8 +198,8 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "processed.locations": {
-      "name": "locations",
+    "processed.toast_locations": {
+      "name": "toast_locations",
       "schema": "processed",
       "columns": {
         "id": {
@@ -227,8 +233,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "business_type": {
-          "name": "business_type",
+        "type": {
+          "name": "type",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
@@ -275,8 +281,8 @@
         }
       },
       "indexes": {
-        "locations_source_identity_idx": {
-          "name": "locations_source_identity_idx",
+        "toast_locations_source_identity_idx": {
+          "name": "toast_locations_source_identity_idx",
           "columns": [
             {
               "expression": "source_system",
@@ -296,8 +302,8 @@
           "method": "btree",
           "with": {}
         },
-        "locations_raw_record_id_idx": {
-          "name": "locations_raw_record_id_idx",
+        "toast_locations_raw_record_id_idx": {
+          "name": "toast_locations_raw_record_id_idx",
           "columns": [
             {
               "expression": "raw_record_id",
@@ -313,9 +319,9 @@
         }
       },
       "foreignKeys": {
-        "locations_raw_record_id_toast_locations_id_fk": {
-          "name": "locations_raw_record_id_toast_locations_id_fk",
-          "tableFrom": "locations",
+        "toast_locations_raw_record_id_toast_locations_id_fk": {
+          "name": "toast_locations_raw_record_id_toast_locations_id_fk",
+          "tableFrom": "toast_locations",
           "tableTo": "toast_locations",
           "schemaTo": "raw",
           "columnsFrom": [
@@ -327,10 +333,10 @@
           "onDelete": "restrict",
           "onUpdate": "no action"
         },
-        "locations_execution_id_pipeline_history_id_fk": {
-          "name": "locations_execution_id_pipeline_history_id_fk",
-          "tableFrom": "locations",
-          "tableTo": "pipeline_history",
+        "toast_locations_execution_id_pipeline_operation_history_id_fk": {
+          "name": "toast_locations_execution_id_pipeline_operation_history_id_fk",
+          "tableFrom": "toast_locations",
+          "tableTo": "pipeline_operation_history",
           "schemaTo": "system",
           "columnsFrom": [
             "execution_id"
@@ -346,13 +352,250 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
-        "locations_name_not_blank": {
-          "name": "locations_name_not_blank",
-          "value": "btrim(\"processed\".\"locations\".\"name\") <> ''"
+        "toast_locations_name_not_blank": {
+          "name": "toast_locations_name_not_blank",
+          "value": "btrim(\"processed\".\"toast_locations\".\"name\") <> ''"
         },
-        "locations_business_type_valid": {
-          "name": "locations_business_type_valid",
-          "value": "\"processed\".\"locations\".\"business_type\" IN ('food_and_beverage', 'retail', 'unclassified')"
+        "toast_locations_type_valid": {
+          "name": "toast_locations_type_valid",
+          "value": "\"processed\".\"toast_locations\".\"type\" IN ('food_and_beverage', 'retail', 'unclassified')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "processed.toast_orders": {
+      "name": "toast_orders",
+      "schema": "processed",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "raw_record_id": {
+          "name": "raw_record_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "location_id": {
+          "name": "location_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_system": {
+          "name": "source_system",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_record_id": {
+          "name": "source_record_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "business_date": {
+          "name": "business_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "voided": {
+          "name": "voided",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "excess_food": {
+          "name": "excess_food",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_in_test_mode": {
+          "name": "created_in_test_mode",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "net_sales_amount": {
+          "name": "net_sales_amount",
+          "type": "numeric(14, 2)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "check_count": {
+          "name": "check_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_created_at": {
+          "name": "source_created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_modified_at": {
+          "name": "source_modified_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "deleted": {
+          "name": "deleted",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "raw_content_revision": {
+          "name": "raw_content_revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "processing_version": {
+          "name": "processing_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "execution_id": {
+          "name": "execution_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "toast_orders_source_identity_idx": {
+          "name": "toast_orders_source_identity_idx",
+          "columns": [
+            {
+              "expression": "source_system",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "source_record_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "toast_orders_raw_record_id_idx": {
+          "name": "toast_orders_raw_record_id_idx",
+          "columns": [
+            {
+              "expression": "raw_record_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "toast_orders_location_business_date_idx": {
+          "name": "toast_orders_location_business_date_idx",
+          "columns": [
+            {
+              "expression": "location_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "business_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "toast_orders_raw_record_id_toast_orders_id_fk": {
+          "name": "toast_orders_raw_record_id_toast_orders_id_fk",
+          "tableFrom": "toast_orders",
+          "tableTo": "toast_orders",
+          "schemaTo": "raw",
+          "columnsFrom": [
+            "raw_record_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "toast_orders_location_id_toast_locations_id_fk": {
+          "name": "toast_orders_location_id_toast_locations_id_fk",
+          "tableFrom": "toast_orders",
+          "tableTo": "toast_locations",
+          "schemaTo": "processed",
+          "columnsFrom": [
+            "location_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "toast_orders_execution_id_pipeline_operation_history_id_fk": {
+          "name": "toast_orders_execution_id_pipeline_operation_history_id_fk",
+          "tableFrom": "toast_orders",
+          "tableTo": "pipeline_operation_history",
+          "schemaTo": "system",
+          "columnsFrom": [
+            "execution_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "toast_orders_check_count_not_negative": {
+          "name": "toast_orders_check_count_not_negative",
+          "value": "\"processed\".\"toast_orders\".\"check_count\" >= 0"
         }
       },
       "isRLSEnabled": false
@@ -495,10 +738,10 @@
         }
       },
       "foreignKeys": {
-        "toast_locations_execution_id_pipeline_history_id_fk": {
-          "name": "toast_locations_execution_id_pipeline_history_id_fk",
+        "toast_locations_execution_id_pipeline_operation_history_id_fk": {
+          "name": "toast_locations_execution_id_pipeline_operation_history_id_fk",
           "tableFrom": "toast_locations",
-          "tableTo": "pipeline_history",
+          "tableTo": "pipeline_operation_history",
           "schemaTo": "system",
           "columnsFrom": [
             "execution_id"
@@ -654,10 +897,10 @@
         }
       },
       "foreignKeys": {
-        "toast_orders_execution_id_pipeline_history_id_fk": {
-          "name": "toast_orders_execution_id_pipeline_history_id_fk",
+        "toast_orders_execution_id_pipeline_operation_history_id_fk": {
+          "name": "toast_orders_execution_id_pipeline_operation_history_id_fk",
           "tableFrom": "toast_orders",
-          "tableTo": "pipeline_history",
+          "tableTo": "pipeline_operation_history",
           "schemaTo": "system",
           "columnsFrom": [
             "execution_id"

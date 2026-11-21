@@ -63,9 +63,10 @@ export const system_logger = {
   child() {return this;}, info(fields) {log_entries.push(fields);}, warn() {}, error() {}
 };
 `);
-    writeFileSync(join(system_directory, "pipeline-history.ts"), `
+    writeFileSync(join(system_directory, "pipeline-operation-history.ts"), `
 export const completions = [];
 export async function record_pipeline_execution_start() {return "synthetic-execution";}
+export async function record_ingestion_records_read() {throw new Error("Processing must not count source reads.");}
 export async function record_pipeline_execution_completion(execution_id, outcome) {
   completions.push(outcome.status);
 }
@@ -80,8 +81,8 @@ export async function request_toast_authorized_json() {throw new Error("Processi
     writeFileSync(join(system_directory, "pgsql-warehouse.ts"), `
 import assert from "node:assert/strict";
 import {PgDialect} from "drizzle-orm/pg-core";
-import {Pipeline_Execution_History} from "./system-schema.ts";
-import {Raw_Toast_Locations, Processed_Locations} from "../toast/toast-schema.ts";
+import {Pipeline_Operation_History} from "./system-schema.ts";
+import {Raw_Toast_Locations, Processed_Toast_Locations} from "../toast/toast-schema.ts";
 const dialect = new PgDialect();
 export const state = {
   raw : [], output : [], count : 0, fail_at : "", pipeline_name : "toast_locations",
@@ -110,11 +111,11 @@ export const warehouse_db = {
             limit(value) {limit = value; return this;},
             async for(mode) {
               assert.equal(mode, "update");
-              if (table === Pipeline_Execution_History) {
+              if (table === Pipeline_Operation_History) {
                 state.lock_order.push("history");
                 return state.execution_valid ? [{pipeline_name : state.pipeline_name}] : [];
               }
-              if (table === Processed_Locations) {
+              if (table === Processed_Toast_Locations) {
                 assert.match(query.sql, /"source_system"/);
                 assert.match(query.sql, /"source_record_id"/);
                 assert.equal(query.params[0], "toast");
@@ -135,10 +136,10 @@ export const warehouse_db = {
           };
         },
         insert(table) {
-          assert.equal(table, Processed_Locations);
+          assert.equal(table, Processed_Toast_Locations);
           return {values(records) {return {
             async onConflictDoUpdate(config) {
-              assert.deepEqual(config.target, [Processed_Locations.source_system, Processed_Locations.source_record_id]);
+              assert.deepEqual(config.target, [Processed_Toast_Locations.source_system, Processed_Toast_Locations.source_record_id]);
               state.upsert_columns = Object.keys(config.set);
               for (const record of records) {
                 const existing = state.output.find(output =>
@@ -161,7 +162,7 @@ export const warehouse_db = {
             const query = dialect.sqlToQuery(predicate);
             state.predicates.push(query);
             return {async returning() {
-              if (table === Processed_Locations) {
+              if (table === Processed_Toast_Locations) {
                 assert.deepEqual(Object.keys(values).sort(), ["type", "updated_at"]);
                 assert.match(query.sql, /"id"/);
                 assert.match(dialect.sqlToQuery(values.updated_at).sql, /now\\(\\)/);
@@ -183,7 +184,7 @@ export const warehouse_db = {
                 for (const record of completed) record.processed = true;
                 return completed.map(record => ({id : record.id}));
               }
-              assert.equal(table, Pipeline_Execution_History);
+              assert.equal(table, Pipeline_Operation_History);
               assert.ok(query.params.includes("synthetic-execution"));
               assert.ok(query.params.includes("running"));
               assert.ok(query.params.includes("processing"));
@@ -220,7 +221,7 @@ export const warehouse_db = {
     const {log_entries} : {log_entries : Array<{event : string; locations_updated? : number}>} =
       await import(pathToFileURL(join(system_directory, "system-logger.ts")).href);
     const {completions} : {completions : string[]} =
-      await import(pathToFileURL(join(system_directory, "pipeline-history.ts")).href);
+      await import(pathToFileURL(join(system_directory, "pipeline-operation-history.ts")).href);
 
     function reset(record_count : number = 1): void {
       toast_location_type_map.clear();

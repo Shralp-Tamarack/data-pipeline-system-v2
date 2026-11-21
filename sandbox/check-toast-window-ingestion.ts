@@ -3,8 +3,8 @@ import {isDeepStrictEqual} from "node:util";
 import {eq} from "drizzle-orm";
 import {env_vars} from "../core/system/system-configuration.ts";
 import {warehouse_db, warehouse_pool} from "../core/system/pgsql-warehouse.ts";
-import {get_or_create_pipeline_progress} from "../core/system/pipeline-progress.ts";
-import {Pipeline_Execution_History} from "../core/system/system-schema.ts";
+import {get_or_create_pipeline_state} from "../core/system/pipeline-state.ts";
+import {Pipeline_Operation_History} from "../core/system/system-schema.ts";
 import {execute_ingestion} from "../core/system/ingestion.ts";
 import {extract_toast_raw_order_window} from "../core/toast/toast-orders.ts";
 import {
@@ -21,7 +21,7 @@ const start_at = new Date("2026-11-11T00:00:00.000Z");
 const end_at = new Date("2026-11-12T00:00:00.000Z");
 
 try {
-  const progress_before = await get_or_create_pipeline_progress(
+  const progress_before = await get_or_create_pipeline_state(
     toast_orders_pipeline_name
   );
 
@@ -41,8 +41,8 @@ try {
 
   const [history_record] = await warehouse_db
     .select()
-    .from(Pipeline_Execution_History)
-    .where(eq(Pipeline_Execution_History.id, execution_id));
+    .from(Pipeline_Operation_History)
+    .where(eq(Pipeline_Operation_History.id, execution_id));
 
   assert.ok(history_record, "Execution history is missing.");
   assert.equal(history_record.status, "succeeded");
@@ -50,7 +50,7 @@ try {
   assert.equal(history_record.records_processed, 0);
   assert.equal(history_record.ingestion_watermark_after, null);
 
-  const progress_after = await get_or_create_pipeline_progress(
+  const progress_after = await get_or_create_pipeline_state(
     toast_orders_pipeline_name
   );
 

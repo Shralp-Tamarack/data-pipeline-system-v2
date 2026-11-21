@@ -4,9 +4,9 @@ import {and, eq, inArray} from "drizzle-orm";
 import {env_vars} from "../core/system/system-configuration.ts";
 import {warehouse_db, warehouse_pool} from "../core/system/pgsql-warehouse.ts";
 import {execute_tracked_pipeline_operation} from "../core/system/pipeline-operation.ts";
-import {get_or_create_pipeline_progress} from "../core/system/pipeline-progress.ts";
+import {get_or_create_pipeline_state} from "../core/system/pipeline-state.ts";
 import {load_raw_records} from "../core/system/raw-pipeline-loader.ts";
-import {Pipeline_Execution_History} from "../core/system/system-schema.ts";
+import {Pipeline_Operation_History} from "../core/system/system-schema.ts";
 import {get_toast_order_page} from "../core/toast/toast-orders.ts";
 import {Raw_Toast_Orders, toast_orders_pipeline_name} from "../core/toast/toast-schema.ts";
 
@@ -29,7 +29,7 @@ try {
   const source_ids = records.map(record => record.source_record_id);
   assert.equal(new Set(source_ids).size, records.length, "Order page contains duplicate source identities.");
 
-  const progress_before = await get_or_create_pipeline_progress(toast_orders_pipeline_name);
+  const progress_before = await get_or_create_pipeline_state(toast_orders_pipeline_name);
   const raw_records_before = await warehouse_db
     .select()
     .from(Raw_Toast_Orders)
@@ -105,8 +105,8 @@ try {
 
   const [history_record] = await warehouse_db
     .select()
-    .from(Pipeline_Execution_History)
-    .where(eq(Pipeline_Execution_History.id, execution_id));
+    .from(Pipeline_Operation_History)
+    .where(eq(Pipeline_Operation_History.id, execution_id));
   assert.ok(history_record, "Execution history is missing.");
   assert.equal(history_record.status, "succeeded", "Execution did not complete successfully.");
   assert.ok(history_record.finished_at, "Execution finish time is missing.");
@@ -115,7 +115,7 @@ try {
   assert.ok(isDeepStrictEqual(history_record.ingestion_watermark_before, progress_before.ingestion_watermark), "Starting watermark is incorrect.");
   assert.equal(history_record.ingestion_watermark_after, null, "Page check must not claim completed coverage.");
 
-  const progress_after = await get_or_create_pipeline_progress(toast_orders_pipeline_name);
+  const progress_after = await get_or_create_pipeline_state(toast_orders_pipeline_name);
   assert.ok(isDeepStrictEqual(progress_after, progress_before), "Page check changed pipeline progress.");
   console.log("Toast Raw load/replay check succeeded. Pipeline progress unchanged.");
 } catch {

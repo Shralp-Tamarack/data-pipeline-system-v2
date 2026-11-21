@@ -37,7 +37,7 @@ test("Raw loading deletion and restoration with local SQL expression evaluation"
 import assert from "node:assert/strict";
 import {DatabaseSync} from "node:sqlite";
 import {PgDialect} from "drizzle-orm/pg-core";
-import {Pipeline_Execution_History} from "./system-schema.ts";
+import {Pipeline_Operation_History} from "./system-schema.ts";
 
 const dialect = new PgDialect();
 export const state = {records : [], count : 0, fail_history : false, rollbacks : 0};
@@ -87,7 +87,7 @@ export const warehouse_db = {
             innerJoin() {return this;},
             where() {return this;},
             async for(mode) {
-              assert.equal(table, Pipeline_Execution_History);
+              assert.equal(table, Pipeline_Operation_History);
               assert.equal(mode, "update");
               return [{pipeline_name : "synthetic_records"}];
             },
@@ -151,7 +151,7 @@ export const warehouse_db = {
           }};
         },
         update(table) {
-          assert.equal(table, Pipeline_Execution_History);
+          assert.equal(table, Pipeline_Operation_History);
           return {set(values) {return {async where() {
             const increment = dialect.sqlToQuery(values.records_loaded);
             assert.match(increment.sql, /"records_loaded" \\+ /);

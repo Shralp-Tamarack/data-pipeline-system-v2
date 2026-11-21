@@ -35,11 +35,11 @@ For what has actually been built, read [project documentation](../README.md). Fo
 
 ### Current delivery position
 
-As of November 19, 2026, the [pipeline and source CLI](../documentation/setup-and-commands.md#commands-and-their-effects) distinguishes stage commands from full sync. `ingest -- toast` refreshes Raw locations, then ingests Raw orders. `sync -- toast-locations` also processes locations. Full Toast sync fails before ingestion until orders processing is registered. There are no Processed orders, Refined reports or scheduled worker.
+As of November 20, 2026, the [pipeline and source CLI](../documentation/setup-and-commands.md#commands-and-their-effects) runs every Toast stage: `ingest`, `process` and `sync` work for locations, orders and the whole `toast` source, with locations before orders. Processed orders carry business date, net sales, check count and status flags. The first Refined model is defined but not applied: `refined.food_and_beverage_outlets` and the per-sale `refined.food_and_beverage_sales` view. There are no dashboard queries or scheduled worker yet.
 
-The shared confirmed-deletion helper and ordinary deletion-aware loading are implemented and offline-tested. The user-shared Toast support reply supports using returned order flags in the normal modification-time feed, with retention unspecified. No missing-ID comparison is implemented. The next milestone is Processed orders, a draft report, and one-day financial reconciliation. See [verification](../documentation/setup-and-commands.md#what-has-been-verified) for evidence and outstanding live checks.
+The shared confirmed-deletion helper and ordinary deletion-aware loading are implemented and offline-tested. The user-shared Toast support reply supports using returned order flags in the normal modification-time feed, with retention unspecified. No missing-ID comparison is implemented. The next milestone is applying the Refined model, writing the first dashboard queries and one-day financial reconciliation. See [verification](../documentation/setup-and-commands.md#what-has-been-verified) for evidence and outstanding live checks.
 
-The shared processing refactor is complete: [processing.ts](../core/system/processing.ts) owns the batch transaction and Raw acknowledgments; locations supplies the mapper/writer and finalization. [pipeline-operation.ts](../core/system/pipeline-operation.ts) tracks one operation; [pipeline-workflow.ts](../core/system/pipeline-workflow.ts) composes stages. Current module names and dependent references passed type-check and 70 affected offline tests. This is a stable development pause point, not unattended operational certification or proof of reuse across multiple real sources. Continue with the [small first step tomorrow](next-steps.md#start-here-tomorrow).
+[processing.ts](../core/system/processing.ts) owns the batch transaction and Raw acknowledgments; locations and orders supply their own mapper/writer. [pipeline-operation.ts](../core/system/pipeline-operation.ts) tracks one operation; [pipeline-workflow.ts](../core/system/pipeline-workflow.ts) composes stages. The user reported processing orders on the experimental target; the assistant has not verified the results. This is a development pause point, not unattended operational certification or proof of reuse across multiple real sources. Continue with [Monday's first steps](next-steps.md#start-here-monday).
 
 ## 2. Target architecture
 
@@ -206,8 +206,9 @@ Keep the implemented Pino logger and durable Neon execution records. Emit JSON b
 
 ### Durable metadata
 
-- Extend the existing `system.pipeline_history` only as needed: execution ID, pipeline, operation, trigger, timestamps, status, counts, safe error summary, and configuration/mapping version.
-- Retain `system.pipeline_progress` for durable checkpoints and independently tracked stage freshness; do not rename/recreate current database identities.
+- Extend the existing `system.pipeline_operation_history` only as needed: execution ID, pipeline, operation, trigger, timestamps, status, counts, safe error summary, and configuration/mapping version.
+- Retain `system.pipeline_state` for durable checkpoints and stage-success timestamps, separate from per-attempt history. The renamed tables are included in the fresh baseline requested after the experimental reset; do not recreate data-bearing databases to apply this naming change.
+- Source `records_read` is persisted separately from committed `records_loaded`/`records_processed`; durations are calculated from start/finish timestamps. Processing success updates state only after finalization and atomically with history completion.
 - Add bounded lifecycle/checkpoint/warning/error event persistence where a concrete operational need requires it.
 - Add recoverable record-level error state with source key/revision, processing version, safe context, and resolution/retry state.
 
@@ -240,14 +241,12 @@ Show one line for daily net sales across reviewed food-and-beverage locations ov
 
 Compare weekly restaurant net sales against comparable weeks last year, with a location filter and visible coverage/freshness. Add this once comparable prior-year coverage is verified; missing prior-year periods are unavailable, not zero.
 
-- `Dim_Location`: stable business locations.
 - `Dim_Date`: business dates and agreed comparable-period rules.
-- `Fact_Restaurant_Transactions`: one original order with split checks combined.
-- Source-location mappings and source ownership by location/date.
+- Built so far: `refined.food_and_beverage_outlets` (stable resort outlets, with one location-ID column per source system) and `refined.food_and_beverage_sales` (one row per original order with split checks combined). These replace the earlier `Dim_Location`, `Fact_Restaurant_Transactions` and separate source-location mapping ideas. Each sale exists in only one source system, so no cutover date is stored; check for overlap once Info Genesis is loaded.
 
-Verify original-order reconstruction in Toast and Info Genesis before implementing the fact. Agree on sales, discounts, refunds, taxes, service charges, voids, timezone, and business-date meanings. Do not assume payment totals equal sales.
+Verify original-order reconstruction in Info Genesis before adding it to the sales view. Agree on sales, discounts, refunds, taxes, service charges, voids, timezone, and business-date meanings. Do not assume payment totals equal sales.
 
-The Toast mapping in the previous project does not subtract refunds; its Info Genesis item mapping has no business date. That code is reference material, not evidence that these gaps are solved. This project has a working locations writer and reviewed type mapping but no Processed order mapping or verified financial model yet.
+The Toast mapping in the previous project does not subtract refunds; its Info Genesis item mapping has no business date. That code is reference material, not evidence that these gaps are solved. This project's Toast order mapping computes net sales, but it has not been reconciled with Toast reports, and refunds are not yet handled.
 
 ## 10. Delivery sequence and acceptance gates
 
@@ -272,8 +271,8 @@ The Toast mapping in the previous project does not subtract refunds; its Info Ge
 
 - Retain shared processing, the locations writer and mapping finalization, focused offline failure tests, and basic user-reported experimental processing/repeat results. Do not duplicate batch safety code for orders. Real PostgreSQL revision/concurrency and rollback checks remain separate evidence gaps.
 - Retain deletion-aware Raw loading, source flag wiring and the support-confirmed normal order-deletion path. Verify stored flag consistency and Processed propagation/restoration before trusting financial reports; retention remains unspecified. Add complete-inventory comparison only for a verified source scope that needs it; preserve historical sales when location activity/access changes.
-- Implement and register Processed orders to enable full Toast sync. Add mapping-version replay and record-error handling as needed. Build a draft before comparing one completed day/location to verify the totals.
-- Build the Refined daily net sales query and 30-day F&B trend chart; choose the report UI tool separately. Defer the year-over-year chart until comparable history is verified.
+- Done: Processed orders are implemented and registered, enabling full Toast sync. Still to add: mapping-version replay and record-error handling as needed.
+- Done (not applied): the Refined outlets table and per-sale F&B sales view. Next: seed the outlets, apply the migrations, then write the daily net sales and 30-day F&B trend queries against the view; choose the report UI tool separately. Defer the year-over-year chart until comparable history is verified.
 - **Gate:** a completed day's totals reconcile with a trusted Toast report, including explicit refund/void cases, and the chart distinguishes missing coverage from verified zero sales.
 
 ### Phase 4 - Historical coverage and second-source proof
@@ -330,4 +329,4 @@ Resolve before the relevant implementation:
 6. Deployment supervisor/hosting and report UI; cross-process database coordination only if the one-worker assumption changes.
 7. Realistic volume, payload-size, memory, and backfill throughput budgets.
 
-**Immediate next step:** [build and register Processed orders](next-steps.md#3-process-orders-and-reconcile-one-completed-day). The manual workflow foundation is in place. Validate full Toast sync before adding the scheduler, and compare the draft report with Toast before publishing.
+**Immediate next step:** [seed the outlets and apply the Refined migrations](next-steps.md#start-here-monday), then write the first dashboard queries and reconcile one completed day with Toast before publishing. Validate full Toast sync before adding the scheduler.

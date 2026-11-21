@@ -6,29 +6,30 @@ import {warehouse_db} from "../system/pgsql-warehouse.ts";
 import {request_toast_authorized_json} from "./toast-authentication.ts";
 import {Toast_Request_Error} from "./toast-request.ts";
 import {execute_tracked_pipeline_operation} from "../system/pipeline-operation.ts";
+import {record_ingestion_records_read} from "../system/pipeline-operation-history.ts";
 import type {Pipeline_Operation_Result} from "../system/pipeline-types.ts";
 import {load_raw_records} from "../system/raw-pipeline-loader.ts";
 import {
   Raw_Toast_Locations,
   toast_locations_pipeline_name,
   toast_source_system_name,
-  Processed_Locations
+  Processed_Toast_Locations
 } from "./toast-schema.ts";
 import {process_pending_raw_records} from "../system/processing.ts";
 import type {Processing_Transaction} from "../system/processing-types.ts";
 import {toast_location_type_map} from "./toast-location-type-map.ts";
 
-const toast_location_schema = z.object({
+const toast_location_ingestion_validator = z.object({
   restaurantGuid : z.string().refine(
     restaurant_guid => restaurant_guid.trim().length > 0
   ),
   deleted : z.boolean()
 }).passthrough();
 
-type Toast_Location_Record = z.infer<typeof toast_location_schema>;
+type Toast_Api_Location = z.infer<typeof toast_location_ingestion_validator>;
 
 /** Reads accessible Toast locations without modifying their source fields. */
-export async function get_toast_locations(signal? : AbortSignal, logger? : Logger): Promise<Toast_Location_Record[]> {
+export async function get_toast_locations(signal? : AbortSignal, logger? : Logger): Promise<Toast_Api_Location[]> {
   signal?.throwIfAborted();
   const response = await request_toast_authorized_json(
     new URL("/partners/v1/restaurants", env_vars.toast_api_host),
@@ -44,7 +45,7 @@ export async function get_toast_locations(signal? : AbortSignal, logger? : Logge
     }
   );
 
-  const validation_result = z.array(toast_location_schema)
+  const validation_result = z.array(toast_location_ingestion_validator)
     .safeParse(response.data);
 
   if (!validation_result.success) {
@@ -70,6 +71,8 @@ export async function ingest_toast_locations(signal : AbortSignal): Promise<Pipe
     ) {
       throw new Error("Toast discovery must return a nonempty list of unique valid location GUIDs.");
     }
+
+    await record_ingestion_records_read(execution_id, locations.length);
 
     let records_changed = 0;
     for (let offset = 0; offset < locations.length; offset += 100) {
@@ -177,10 +180,10 @@ async function write_processed_locations(
   }));
 
   await transaction
-    .insert(Processed_Locations)
+    .insert(Processed_Toast_Locations)
     .values(processed_locations)
     .onConflictDoUpdate({
-      target : [Processed_Locations.source_system, Processed_Locations.source_record_id],
+      target : [Processed_Toast_Locations.source_system, Processed_Toast_Locations.source_record_id],
       set : {
         name : sql`excluded.name`,
         deleted : sql`excluded.deleted`,
@@ -229,13 +232,13 @@ export async function apply_toast_location_types(): Promise<number> {
     for (const [source_record_id, type] of mapped_location_types) {
       const [location] = await transaction
         .select({
-          id : Processed_Locations.id,
-          type : Processed_Locations.type
+          id : Processed_Toast_Locations.id,
+          type : Processed_Toast_Locations.type
         })
-        .from(Processed_Locations)
+        .from(Processed_Toast_Locations)
         .where(and(
-          eq(Processed_Locations.source_system, toast_source_system_name),
-          eq(Processed_Locations.source_record_id, source_record_id)
+          eq(Processed_Toast_Locations.source_system, toast_source_system_name),
+          eq(Processed_Toast_Locations.source_record_id, source_record_id)
         ))
         .for("update");
 
@@ -248,13 +251,13 @@ export async function apply_toast_location_types(): Promise<number> {
       }
 
       const updated_locations = await transaction
-        .update(Processed_Locations)
+        .update(Processed_Toast_Locations)
         .set({
           type : type,
           updated_at : sql`now()`
         })
-        .where(eq(Processed_Locations.id, location.id))
-        .returning({id : Processed_Locations.id});
+        .where(eq(Processed_Toast_Locations.id, location.id))
+        .returning({id : Processed_Toast_Locations.id});
 
       if (updated_locations.length !== 1) {
         throw new Error("The Toast location type update did not affect exactly one location.");

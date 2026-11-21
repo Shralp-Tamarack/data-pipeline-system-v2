@@ -7,10 +7,10 @@ import {warehouse_db, warehouse_pool} from "../core/system/pgsql-warehouse.ts";
 import {
   record_pipeline_execution_start,
   record_pipeline_execution_completion
-} from "../core/system/pipeline-history.ts";
-import {get_or_create_pipeline_progress} from "../core/system/pipeline-progress.ts";
+} from "../core/system/pipeline-operation-history.ts";
+import {get_or_create_pipeline_state} from "../core/system/pipeline-state.ts";
 import {load_raw_records} from "../core/system/raw-pipeline-loader.ts";
-import {Pipeline_Execution_History} from "../core/system/system-schema.ts";
+import {Pipeline_Operation_History} from "../core/system/system-schema.ts";
 import {
   Raw_Toast_Orders,
   toast_orders_pipeline_name
@@ -42,7 +42,7 @@ let execution_id : string | undefined;
 let execution_finished = false;
 
 try {
-  const progress_before = await get_or_create_pipeline_progress(
+  const progress_before = await get_or_create_pipeline_state(
     toast_orders_pipeline_name
   );
 
@@ -143,8 +143,8 @@ try {
 
   const [history_after_conflict] = await warehouse_db
     .select()
-    .from(Pipeline_Execution_History)
-    .where(eq(Pipeline_Execution_History.id, execution_id));
+    .from(Pipeline_Operation_History)
+    .where(eq(Pipeline_Operation_History.id, execution_id));
 
   assert.ok(history_after_conflict);
   assert.equal(history_after_conflict.records_loaded, 2);
@@ -152,9 +152,9 @@ try {
   console.log("Context conflict rolled back the whole batch.");
 
   await warehouse_db
-    .update(Pipeline_Execution_History)
+    .update(Pipeline_Operation_History)
     .set({records_loaded : 2_147_483_647})
-    .where(eq(Pipeline_Execution_History.id, execution_id));
+    .where(eq(Pipeline_Operation_History.id, execution_id));
 
   try {
     await assert.rejects(
@@ -192,21 +192,21 @@ try {
 
     const [history_after_failure] = await warehouse_db
       .select()
-      .from(Pipeline_Execution_History)
-      .where(eq(Pipeline_Execution_History.id, execution_id));
+      .from(Pipeline_Operation_History)
+      .where(eq(Pipeline_Operation_History.id, execution_id));
 
     assert.ok(history_after_failure);
     assert.equal(history_after_failure.records_loaded, 2_147_483_647);
   } finally {
     await warehouse_db
-      .update(Pipeline_Execution_History)
+      .update(Pipeline_Operation_History)
       .set({records_loaded : 2})
-      .where(eq(Pipeline_Execution_History.id, execution_id));
+      .where(eq(Pipeline_Operation_History.id, execution_id));
   }
 
   console.log("Database failure rolled back the Raw insert and count update.");
 
-  const progress_after = await get_or_create_pipeline_progress(
+  const progress_after = await get_or_create_pipeline_state(
     toast_orders_pipeline_name
   );
 

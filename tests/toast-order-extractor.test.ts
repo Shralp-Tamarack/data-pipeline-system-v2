@@ -50,13 +50,13 @@ export const toast_configuration = {request_page_size : 100};
     writeFileSync(join(toast_directory, "toast-schema.ts"), `
 export const Raw_Toast_Orders = {};
 export const Raw_Toast_Locations = {};
-export const Processed_Locations = {};
+export const Processed_Toast_Locations = {};
 export const toast_locations_pipeline_name = "toast_locations";
 export const toast_source_system_name = "toast";
 `);
     writeFileSync(join(system_directory, "system-schema.ts"), `
-export const Pipeline_Execution_History = {};
-export const Pipeline_Progress = {};
+export const Pipeline_Operation_History = {};
+export const Pipeline_State = {};
 `);
     writeFileSync(join(system_directory, "pgsql-warehouse.ts"), `
 export const warehouse_db = {
@@ -67,6 +67,7 @@ export const warehouse_db = {
       ["ingestion.ts", "execute_ingestion"],
       ["processing.ts", "process_pending_raw_records"],
       ["pipeline-operation.ts", "execute_tracked_pipeline_operation"],
+      ["pipeline-operation-history.ts", "record_ingestion_records_read"],
       ["raw-pipeline-loader.ts", "load_raw_records"]
     ] as const) {
       writeFileSync(join(system_directory, filename), `

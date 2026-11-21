@@ -17,7 +17,7 @@ flowchart TD
     A[execute_tracked_pipeline_operation] --> B{Pipeline active in this process?}
     B -->|Yes| R[Reject before history registration]
     B -->|No| C[Mark active synchronously]
-    C --> D[Register progress and running history]
+    C --> D[Register state and running operation history]
     D --> E[Execute supplied work]
     E -->|Returns| F[Persist terminal outcome]
     E -->|Throws| G[Persist failed outcome and throw execution-ID error]
@@ -32,13 +32,18 @@ One worker/process is the operating assumption. Do not run standalone ingestion 
 
 Completion preserves previously committed counts/checkpoints when omitted from the outcome. The operation tracker returns a `Pipeline_Operation_Result` containing the execution ID and persisted status, or throws on a failure; logs for an execution carry its `execution_id`. History stores a safe summary of thrown work errors, while the exception retains the original cause without automatically logging it. If required history persistence fails, that error surfaces and history may remain `running`.
 
+Successful processing completion updates history and `pipeline_state.last_successful_processing_at` in one transaction, after all batches and finalization. A failure to save state rolls completion back. Duration is calculated from history's start/finish timestamps; the state table does not duplicate each attempt's metrics.
+
+Successful ingestion completion similarly updates `last_successful_ingestion_at` atomically with history, including snapshots and unchanged refreshes. Window checkpoints do not update this success timestamp; they remain independently committed recovery points.
+
 ## 3. Raw batch transaction
 
 ```mermaid
 flowchart TD
-    A[Source yields bounded batch] --> B[Validate identities and maximum 100 records]
+    A[Source yields bounded batch] --> Q[Persist source-read count separately]
+    Q --> B[Validate identities and maximum 100 records]
     B --> C[Begin transaction]
-    C --> D[Lock running history/progress and verify pipeline]
+    C --> D[Lock running history/state and verify pipeline]
     D --> E[Insert new or update changed payload or deletion status]
     E --> F[Reject conflicting supplied source context]
     F --> G[Increment history by committed changes]
@@ -49,7 +54,7 @@ flowchart TD
     G -->|Failure| R
 ```
 
-Remote reads occur outside database transactions. [The loader](../core/system/raw-pipeline-loader.ts) commits Raw changes and counts together; it does not advance source coverage.
+Remote reads occur outside database transactions. Shared ingestion records each delivered batch's `records_read` before loading it. This count includes unchanged replays and survives a later load failure, but does not count rejected source responses or network attempts. A read-count persistence failure stops ingestion. [The loader](../core/system/raw-pipeline-loader.ts) commits Raw changes and `records_loaded` together; it does not advance source coverage. The table below describes `records_loaded`, not `records_read`.
 
 | Input | Raw effect | History count |
 | --- | --- | --- |
@@ -92,11 +97,11 @@ flowchart TD
 
 [Toast orders](../core/toast/toast-orders.ts) starts at June 1, 2026, midnight UTC when no watermark exists. This is a chosen boundary, not proof of available history. It discovers locations once per run when extraction is needed, then consumes each location's pages (up to 100 orders per page) in every window. Invalid, empty or duplicate location discovery fails rather than claiming coverage. Order windows use source modification time, not the date the order was placed.
 
-After the extractor finishes, [window completion](../core/system/pipeline-progress.ts) runs a separate short transaction:
+After the extractor finishes, [window completion](../core/system/pipeline-state.ts) runs a separate short transaction:
 
 1. Lock and verify the running execution and associated pipeline progress.
 2. Require the previous watermark to match expected state.
-3. Advance progress to the window end, update successful-ingestion/update timestamps, and record the same watermark in history.
+3. Advance progress to the window end, update `updated_at`, and record the same watermark in history without marking the entire operation successful.
 4. Commit both updates, or roll back both on failure.
 
 The source calls and Raw batches are not held inside this checkpoint transaction. Checkpoint failure cannot make the code skip an unfinished boundary; replay may repeat already committed Raw changes safely when payloads/context are unchanged.
@@ -107,7 +112,7 @@ The source calls and Raw batches are not held inside this checkpoint transaction
 - Earlier fully completed windows remain checkpointed even if the overall run subsequently fails.
 - A crash after the last batch but before checkpointing leaves that window unacknowledged. The next configured run starts at the last durable boundary minus the lookback, so it may replay some already committed work.
 - Cancellation is checked around windows/batches/loads. In-flight database queries are not immediately cancelled; committed work is not undone. Thrown cancellation currently records `failed`, not `cancelled`.
-- Successful-ingestion time is the time of the last checkpointed window, not proof the complete run or downstream processing succeeded.
+- Successful-ingestion time records the last fully successful ingestion operation, not an individual window checkpoint or downstream processing success. Snapshot success updates this time without creating a watermark.
 - A changing source is not a snapshot. The current overlap mitigates some late arrivals; it does not guarantee coverage of late or older corrections or prevent all out-of-order versions.
 - Newly discovered restaurants do not automatically get earlier historical coverage once shared progress has advanced; deliberate historical replay is needed for that scope change.
 
@@ -119,7 +124,7 @@ Offline synthetic tests exercise these boundaries and checkpoint transaction log
 
 The [registry](../core/system/pipeline-registry.ts) lists the pipelines in dependency order. A [workflow](../core/system/pipeline-workflow.ts) runs a single stage across the selected target or, for `sync`, runs **ingest → reconcile if registered → process** for each pipeline before moving to the next. Missing required handlers are detected for the whole target before any stage starts. A throwing or non-successful stage stops the rest of the workflow; already committed work stays saved. These are separately tracked stages, not one transaction. See [command availability](setup-and-commands.md#commands-and-their-effects).
 
-The intended full Toast sequence is location ingest, optional location reconciliation, location process, then order ingest, optional order reconciliation, order process. There are currently no Toast reconcilers and no orders processor, so full Toast sync fails preflight before doing any work. The available source-wide Raw refresh is `ingest -- toast`, not `sync -- toast`. The future scheduler will await each source's workflow while allowing bounded concurrency across independent sources; it is not implemented yet.
+The full Toast sequence is location ingest, optional location reconciliation, location process, then order ingest, optional order reconciliation, order process. There are currently no Toast reconcilers, so `sync -- toast` runs the other four stages in that order. `ingest -- toast` remains the Raw-only refresh. The future scheduler will await each source's workflow while allowing bounded concurrency across independent sources; it is not implemented yet.
 
 Both order and location adapters require a boolean source `deleted` value and forward it alongside the preserved payload into ordinary Raw loading. A malformed flag fails the source response validation. Access removal can make a location disappear without a deletion record; see [Toast's deletion/access boundary](architecture.md#toast-deletion-contract-and-access-limits). The current flow neither records access loss separately nor deletes missing locations or their orders.
 
@@ -149,7 +154,19 @@ The upsert does not overwrite `type`. Finalization applies the reviewed [GUID-to
 
 `processing_batch_completed` records positive Raw batch counts. `location_types_applied` records changed classifications separately as `locations_updated`. Both use the processing execution's logger. A rerun without Raw or mapping changes has zero Raw work and zero classification changes. A mapping edit can change classifications without modifying Raw or the ingestion watermark.
 
-Finalization is inside the tracked execution and process-local guard, not a follow-up after success. It must finish before success is recorded. Cancellation cannot undo committed batches or an already committed type transaction; thrown cancellation currently records failure. No helper updates `last_successful_processing_at` yet.
+Finalization is inside the tracked execution and process-local guard, not a follow-up after success. It must finish before success is recorded. Cancellation cannot undo committed batches or an already committed type transaction; thrown cancellation currently records failure. Only successful completion advances `last_successful_processing_at`, including a successful zero-pending-work run; it is not a report-coverage timestamp.
+
+## 6a. Processed orders and Refined F&B sales
+
+```text
+raw.toast_orders --(process -- toast-orders)--> processed.toast_orders
+  --join processed.toast_locations (Toast GUID)--> refined.food_and_beverage_outlets
+  --view--> refined.food_and_beverage_sales (one row per valid sale)
+```
+
+`npm run process -- toast-orders` uses the same shared batch transaction as locations, with no finalization. For each batch the [order writer](../core/toast/toast-orders.ts) looks up Processed location IDs by the Raw `source_context.restaurant_guid`, maps each order (validation, business date, net sales in cents, flags), and upserts by source identity. A validation failure, identity mismatch, invalid date/timestamp or unprocessed location rolls back the whole batch and fails the execution; earlier batches remain committed. Fix the cause and rerun; the failed batch is still pending.
+
+The Refined sales view is computed at query time. It has no refresh stage, so a processed order appears in reports immediately. Orders at Toast locations that are not listed in `refined.food_and_beverage_outlets` are excluded, as are voided, deleted, excess-food and test-mode orders. See [Refined food and beverage sales](architecture.md#refined-food-and-beverage-sales).
 
 ## 7. Deletion handling and source-contract limits
 
@@ -164,17 +181,17 @@ The following pieces are implemented:
 - Ordinary `load_raw_records` applies optional deletion metadata and explicit restoration. A payload or effective status change increments the revision and queues processing transactionally with history counts.
 - Toast orders and locations validate and forward the returned source flag. This path does not call the separate deletion helper or scan every stored ID.
 - `mark_raw_records_deleted` in [the Raw loader](../core/system/raw-pipeline-loader.ts) marks confirmed, existing active Raw IDs deleted in batches of at most 100. It requires the correct running execution, preserves payload/identity, increments revisions and sets `processed = false`. Raw changes and history `records_loaded` increment commit together; repeat/unknown IDs contribute zero changes.
-- The location mapper carries `raw.deleted OR content.deleted` into Processed, with output and exact Raw acknowledgment in the same transaction.
+- The location and order mappers carry `raw.deleted OR content.deleted` into Processed, with output and exact Raw acknowledgment in the same transaction. The Refined F&B sales view excludes deleted orders.
 
 Restoration follows the same path with explicit `deleted = false`. Omission does not restore. For locations, both Raw and payload must say active to restore Processed; a Raw-only flag change cannot override a still-deleted payload.
 
-There is **no automatic caller of the separate deletion helper**, no source-missing comparison, and no Processed orders implementation. The returned-flag path has offline coverage, but actual source deletion/restoration delivery has not been verified end to end.
+There is **no automatic caller of the separate deletion helper** and no source-missing comparison. The returned-flag path has offline coverage, but actual source deletion/restoration delivery has not been verified end to end.
 
 Source deletion is different from a void or refund. An ID missing from incremental/date-filtered results is not proof of deletion. Automatic missing-record deletion must wait for a complete, authoritative inventory of the same scope and a successfully finished scan. Unchanged rows do not receive a new execution ID on ordinary replay, so the existing Raw `execution_id` cannot serve as a last-seen marker.
 
 Use Toast's returned order flags rather than a full-ID scan for normal ingestion. Deleted-order retention is unspecified. Toast integration access removal is a separate visibility event, not a reason to soft-delete historical business data.
 
-Analytics must deliberately handle deleted data; there is no current report/view enforcing that policy. Location inactivity must not automatically erase valid historical sales through a location filter. Propagation to Processed requires successful processing and is not immediately guaranteed when processing is failing. [Next steps](../plan/next-steps.md) records the source questions and remaining stages.
+Analytics must deliberately handle deleted data; the Refined F&B sales view excludes deleted orders, and future reports must do the same. Location inactivity must not automatically erase valid historical sales through a location filter. Propagation to Processed requires successful processing and is not immediately guaranteed when processing is failing. [Next steps](../plan/next-steps.md) records the source questions and remaining stages.
 
 ## 8. Publication boundary
 
@@ -182,7 +199,7 @@ Analytics must deliberately handle deleted data; there is no current report/view
 durable Raw -> revision-safe Processed -> business-oriented Refined -> published freshness
 ```
 
-Locations processing is implemented and user-reported on the experimental database. Remaining work includes:
+Locations processing is implemented and user-reported on the experimental database. Orders processing and the Refined F&B sales view are implemented; the user indicated orders were processed on November 20, but the assistant has not verified Processed order counts, and the Refined migration is not yet applied. Remaining work includes:
 
 - Verify actual PostgreSQL lock/revision concurrency and rollback boundaries beyond the synthetic tests and simple user-reported executions.
 - Support mapping-version replay without re-fetching unchanged Raw records.
